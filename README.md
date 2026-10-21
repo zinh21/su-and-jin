@@ -13,7 +13,7 @@
 - 20725 조진형: 어린이보호구역은 어린이의 교통안전을 위해 지정된 공간이지만, 실제로 교통사고를 줄이는 효과가 있는지 궁금했기 때문이다. 따라서 사고 발생 데이터를 분석하여 어린이보호구역의 효과를 확인하고자 했다.
 
 ## 데이터
-- 출처(주소): https://taas.koroad.or.kr/sta/acs/exs/typical.do?menuld=WEB_KMP_OVT_UAS_PDS_CHD       https://www.index.go.kr/unity/potal/main/EachDtlPageDetail.do?idx_cd=1616
+- 출처(주소): https://taas.koroad.or.kr/sta/acs/exs/typical.do?menuld=WEB_KMP_OVT_UAS_PDS_CHD  (한국도로교통공단TAAS)     https://www.index.go.kr/unity/potal/main/EachDtlPageDetail.do?idx_cd=1616  (지표누리 e나라지표)
 - 기간·행 수·열 수: 기간 : 2022년1월-2024년12월/6행/4열,                                             2022년1월-2024년12월/4행/2열
 - 사용한 열: 사고건수,사망자수, 부상자수 / 어린이보호구역 지정현황
 - 개인 단위 정보 없음 확인: 아니요
