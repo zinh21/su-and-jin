@@ -14,7 +14,7 @@
 
 ## 데이터
 - 출처(주소): https://taas.koroad.or.kr/sta/acs/exs/typical.do?menuld=WEB_KMP_OVT_UAS_PDS_CHD     https://www.index.go.kr/unity/potal/main/EachDtlPageDetail.do?idx_cd=1616
-- 기간·행 수·열 수: 기간 : 2022년1월~2024년12월/6행/4열, 2022년1월~2024년12월/4행/2열
+- 기간·행 수·열 수: 기간 : 2022년1월-2024년12월/6행/4열, 2022년1월-2024년12월/4행/2열
 - 사용한 열: 
 - 개인 단위 정보 없음 확인: 아니요
 
