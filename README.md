@@ -16,7 +16,7 @@
 - 출처(주소): https://taas.koroad.or.kr/sta/acs/exs/typical.do?menuld=WEB_KMP_OVT_UAS_PDS_CHD
 - 기간·행 수·열 수: 
 - 사용한 열: 
-- 개인 단위 정보 없음 확인: 예 / 아니요
+- 개인 단위 정보 없음 확인: 아니요
 
 ## 방법
 회귀 · 분류 · 군집 · 연관 중 하나. 왜 이 방법인지 한두 문장.
