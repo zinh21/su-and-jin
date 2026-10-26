@@ -22,10 +22,11 @@ ZONE_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/main/
 TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/main/%EA%B5%90%ED%86%B5%EC%82%AC%EA%B3%A0%ED%86%B5%EA%B3%84_20261026.csv"
 
 TOTAL_WORDS = ["합계", "전국", "계", "전체", "총계"]
+YEAR_RE = r"^\s*((?:19|20)\d{2})"
 
 
 # -----------------------------
-# 함수
+# 기본 함수
 # -----------------------------
 @st.cache_data(show_spinner="데이터를 불러오는 중...")
 def load_csv(url):
@@ -57,21 +58,8 @@ def pct(a, b):
     return (a - b) / b * 100 if b else 0
 
 
-def find_year_col(df):
-    for c in df.columns:
-        if any(k in str(c) for k in ["연도", "년도", "기간", "년", "year", "Year"]):
-            if to_year(df[c]).notna().mean() > 0.5:
-                return c
-    for c in df.columns:
-        if to_year(df[c]).notna().mean() > 0.8:
-            return c
-    return None
-
-
 def make_unique(columns):
-    """중복된 열 이름 뒤에 _1, _2를 붙여 고유하게 만든다."""
-    seen = {}
-    result = []
+    seen, result = {}, []
     for c in columns:
         c = str(c).strip()
         if c in seen:
@@ -83,51 +71,76 @@ def make_unique(columns):
     return result
 
 
-def prepare(df):
-    """열 이름 정리 + '2022년 사고건수'처럼 연도가 열 이름에 있으면 세로형으로 변환"""
+def clean_item(text):
+    """'2022년 사고건수', '2022.1' 같은 열 이름에서 항목 이름만 남긴다."""
+    t = re.sub(YEAR_RE, "", str(text))
+    t = re.sub(r"[._]\d+$", "", t)
+    t = t.replace("년", "", 1) if t.startswith("년") else t
+    return t.strip()
+
+
+# -----------------------------
+# 어떤 모양의 표든 세로형으로 통일
+# 결과 열: __연도, __항목, __값 + 나머지 구분 열
+# -----------------------------
+def to_long(df):
     df = df.copy()
     df.columns = make_unique(df.columns)
 
-    year_cols = [c for c in df.columns if re.match(r"^(19|20)\d{2}", c)]
-    if len(year_cols) < 2:
-        return df
+    year_cols = [c for c in df.columns if re.match(YEAR_RE, c)]
 
-    id_cols = [c for c in df.columns if c not in year_cols]
-    long = df.melt(
-        id_vars=id_cols,
-        value_vars=year_cols,
-        var_name="__열이름__",
-        value_name="__값__",
-        ignore_index=True,
-    )
+    # (A) 연도가 열 이름인 가로형
+    if len(year_cols) >= 1:
+        items = {c: clean_item(c) for c in year_cols}
 
-    # '2022년 사고건수' -> 연도=2022, 항목='사고건수'
-    parts = long["__열이름__"].str.extract(r"^((?:19|20)\d{2})\D*(.*)$")
-    long["__연도__"] = parts[0]
-    long["__항목__"] = parts[1].str.replace(r"_\d+$", "", regex=True).str.strip()
+        # 첫 행에 항목 이름(사고건수 등)이 들어 있는 경우
+        first = df.iloc[0][year_cols] if len(df) else None
+        if first is not None:
+            is_text = to_number(first).isna() & first.astype(str).str.strip().ne("") & first.notna()
+            if is_text.mean() > 0.5:
+                items = {c: str(first[c]).strip() for c in year_cols}
+                df = df.iloc[1:].reset_index(drop=True)
 
-    # 기존 열과 이름이 겹치지 않도록 정리
-    long = long.drop(columns=["__열이름__"])
-    for old in ["연도", "값"]:
-        if old in long.columns:
-            long = long.rename(columns={old: f"{old}_원본"})
-    long = long.rename(columns={"__연도__": "연도", "__값__": "값"})
+        id_cols = [c for c in df.columns if c not in year_cols]
+        parts = []
+        for c in year_cols:
+            tmp = df[id_cols].copy()
+            tmp["__연도"] = int(re.match(YEAR_RE, c).group(1))
+            tmp["__항목"] = items[c] if items[c] else "값"
+            tmp["__값"] = to_number(df[c])
+            parts.append(tmp)
+        long = pd.concat(parts, ignore_index=True)
+        return long.dropna(subset=["__값"])
 
-    # 항목 이름이 있으면 구분 열로 사용 (사고건수/사망자수/부상자수 등)
-    if (long["__항목__"] != "").any():
-        if "구분" in long.columns:
-            long = long.rename(columns={"구분": "구분_원본"})
-        long = long.rename(columns={"__항목__": "구분"})
-    else:
-        long = long.drop(columns=["__항목__"])
+    # (B) 연도가 행(값)으로 들어 있는 세로형
+    ycol = None
+    for c in df.columns:
+        if to_year(df[c]).notna().mean() > 0.6:
+            ycol = c
+            break
+    if ycol is None:
+        return None
 
+    value_cols = [c for c in df.columns if c != ycol and to_number(df[c]).notna().mean() > 0.5]
+    id_cols = [c for c in df.columns if c != ycol and c not in value_cols]
+    parts = []
+    for c in value_cols:
+        tmp = df[id_cols].copy()
+        tmp["__연도"] = to_year(df[ycol])
+        tmp["__항목"] = c.strip()
+        tmp["__값"] = to_number(df[c])
+        parts.append(tmp)
+    if not parts:
+        return None
+    long = pd.concat(parts, ignore_index=True).dropna(subset=["__연도", "__값"])
+    long["__연도"] = long["__연도"].astype(int)
     return long
 
 
-def keep_total_rows(df, skip):
-    """'합계', '전국' 같은 총계 행이 있으면 그 행만 남겨 중복 합산 방지"""
+def keep_total_rows(df):
+    """'합계', '전국' 같은 총계 행이 있으면 그 행만 남겨 중복 합산을 막는다."""
     for c in df.columns:
-        if c in skip or df[c].dtype != object:
+        if c.startswith("__") or df[c].dtype != object:
             continue
         mask = df[c].astype(str).str.strip().isin(TOTAL_WORDS)
         if mask.any():
@@ -135,53 +148,42 @@ def keep_total_rows(df, skip):
     return df
 
 
-def numeric_cols(df, exclude):
-    return [c for c in df.columns if c not in exclude and to_number(df[c]).notna().mean() > 0.5]
-
-
-def by_year(df, ycol, vcol):
-    out = pd.DataFrame({"연도": to_year(df[ycol]), "값": to_number(df[vcol])}).dropna()
-    if out.empty:
+def yearly(df):
+    if df is None or df.empty:
         return None
-    out["연도"] = out["연도"].astype(int)
-    return out.groupby("연도")["값"].sum().sort_index()
+    return df.groupby("__연도")["__값"].sum().sort_index()
 
 
-def extract(df, ycol, keywords, exclude_kw=()):
-    """① 열 이름에서 찾고, ② 없으면 행의 값(구분 열 등)에서 찾는다."""
-    # ① 가로형: 열 이름에 키워드
+def pick(long, keywords, exclude_kw=()):
+    """항목 이름(또는 구분 열의 값)에서 키워드가 들어간 자료를 찾아 연도별 합계를 만든다."""
+    if long is None:
+        return None
+    norm = lambda s: str(s).replace(" ", "")
+
+    # ① 항목 이름에서 찾기
     for kw in keywords:
-        for c in df.columns:
-            name = c.replace(" ", "")
-            if c == ycol or kw not in name or any(e in name for e in exclude_kw):
-                continue
-            if to_number(df[c]).notna().mean() > 0.5:
-                sub = keep_total_rows(df, [ycol, c])
-                s = by_year(sub, ycol, c)
+        for item in long["__항목"].unique():
+            n = norm(item)
+            if kw in n and not any(e in n for e in exclude_kw):
+                sub = keep_total_rows(long[long["__항목"] == item])
+                s = yearly(sub)
                 if s is not None:
                     return s
-    # ② 세로형: 행의 값에 키워드
-    pattern = "|".join(keywords)
-    for c in df.columns:
-        if c == ycol or df[c].dtype != object:
+
+    # ② 구분 열의 값에서 찾기
+    for c in long.columns:
+        if c.startswith("__") or long[c].dtype != object:
             continue
-        vals = df[c].astype(str).str.replace(" ", "", regex=False)
-        mask = vals.str.contains(pattern, regex=True)
-        if exclude_kw:
-            mask &= ~vals.str.contains("|".join(exclude_kw), regex=True)
-        if not mask.any():
-            continue
-        sub = df[mask]
-        vcol = "값" if "값" in sub.columns else None
-        if vcol is None:
-            nums = numeric_cols(sub, [ycol, c])
-            vcol = nums[0] if nums else None
-        if vcol is None:
-            continue
-        sub = keep_total_rows(sub, [ycol, c, vcol])
-        s = by_year(sub, ycol, vcol)
-        if s is not None:
-            return s
+        vals = long[c].map(norm)
+        for kw in keywords:
+            mask = vals.str.contains(kw, regex=False)
+            for e in exclude_kw:
+                mask &= ~vals.str.contains(e, regex=False)
+            if mask.any():
+                sub = keep_total_rows(long[mask])
+                s = yearly(sub)
+                if s is not None:
+                    return s
     return None
 
 
@@ -200,48 +202,34 @@ if zone_raw is None or traffic_raw is None:
     st.error("CSV 파일을 불러오지 못했습니다. 인터넷 연결과 주소(공개 저장소인지)를 확인해 주세요.")
     st.stop()
 
-zone_df = prepare(zone_raw)
-traffic_df = prepare(traffic_raw)
+zone_long = to_long(zone_raw)
+traffic_long = to_long(traffic_raw)
 
 # -----------------------------
-# 어린이보호구역 데이터
+# 어린이보호구역 지정 수
 # -----------------------------
-z_year = find_year_col(zone_df)
-zone_series = None
-if z_year is not None:
-    if "값" in zone_df.columns:
-        sub = keep_total_rows(zone_df, [z_year, "값"])
-        zone_series = by_year(sub, z_year, "값")
-    else:
-        zone_series = extract(zone_df, z_year, ["지정", "개소", "보호구역", "합계"])
-        if zone_series is None:
-            nums = numeric_cols(zone_df, [z_year])
-            if nums:
-                sub = keep_total_rows(zone_df, [z_year, nums[-1]])
-                zone_series = by_year(sub, z_year, nums[-1])
+zone_series = pick(zone_long, ["지정", "개소", "보호구역"])
+if zone_series is None and zone_long is not None and not zone_long.empty:
+    first_item = zone_long["__항목"].iloc[0]
+    zone_series = yearly(keep_total_rows(zone_long[zone_long["__항목"] == first_item]))
 
 if zone_series is None or len(zone_series) == 0:
     st.error("어린이보호구역 CSV에서 연도/지정 수를 찾지 못했습니다. 아래 구조를 알려주세요.")
     show_structure("어린이보호구역 CSV", zone_raw)
     st.stop()
 
-zones = zone_series.rename("지정 수").reset_index()
+zones = zone_series.rename("지정 수").reset_index().rename(columns={"__연도": "연도"})
 
 # -----------------------------
-# 교통사고 데이터
+# 교통사고 (사고 건수 / 사망자 수 / 부상자 수)
 # -----------------------------
-t_year = find_year_col(traffic_df)
-if t_year is None:
-    st.error("교통사고 CSV에서 연도를 찾지 못했습니다. 아래 구조를 알려주세요.")
-    show_structure("교통사고 CSV", traffic_raw)
-    st.stop()
+death = pick(traffic_long, ["사망"])
+injury = pick(traffic_long, ["부상"])
+acc = pick(traffic_long, ["사고건수", "발생건수", "사고", "건수"], exclude_kw=["사망", "부상"])
 
 found = {}
-death = extract(traffic_df, t_year, ["사망"])
-injury = extract(traffic_df, t_year, ["부상"])
-acc = extract(traffic_df, t_year, ["사고건수", "발생건수", "사고", "건수"], exclude_kw=["사망", "부상"])
 for name, s in [("사고 건수", acc), ("사망자 수", death), ("부상자 수", injury)]:
-    if s is not None:
+    if s is not None and len(s) > 0:
         found[name] = s
 
 if not found:
@@ -255,12 +243,16 @@ items = list(found.keys())
 
 # 두 자료에서 겹치는 연도만 사용
 common = sorted(set(zones["연도"]) & set(traffic["연도"]))
-if len(common) >= 2:
+if len(common) >= 1:
     zones = zones[zones["연도"].isin(common)].reset_index(drop=True)
     traffic = traffic[traffic["연도"].isin(common)].reset_index(drop=True)
 
 first_y, last_y = int(traffic["연도"].iloc[0]), int(traffic["연도"].iloc[-1])
 st.caption(f"분석 기간: {first_y}년 ~ {last_y}년")
+
+with st.expander("🔧 원본 CSV 구조 확인 (문제가 있을 때 열어 보세요)"):
+    show_structure("어린이보호구역 CSV", zone_raw)
+    show_structure("교통사고 CSV", traffic_raw)
 
 # -----------------------------
 # 핵심 수치
@@ -312,10 +304,13 @@ if len(merged) >= 2:
     idx = pd.DataFrame({"연도": merged["연도"]})
     for n in ["지정 수"] + items:
         base = merged[n].iloc[0]
-        idx["보호구역 지정 수" if n == "지정 수" else n] = merged[n] / base * 100 if base else None
-    long = idx.melt(id_vars="연도", var_name="항목", value_name="지수")
-    fig_idx = px.line(long, x="연도", y="지수", color="항목", markers=True,
-                      title=f"{int(merged['연도'].iloc[0])}년 = 100 기준 변화")
+        label = "보호구역 지정 수" if n == "지정 수" else n
+        idx[label] = merged[n] / base * 100 if base else None
+    idx_long = idx.melt(id_vars="연도", var_name="항목", value_name="지수")
+    fig_idx = px.line(
+        idx_long, x="연도", y="지수", color="항목", markers=True,
+        title=f"{int(merged['연도'].iloc[0])}년 = 100 기준 변화",
+    )
     fig_idx.update_layout(xaxis=dict(type="category"))
     st.plotly_chart(fig_idx, use_container_width=True)
     st.caption("단위가 다른 항목도 같은 기준(시작 연도 = 100)으로 바꾸면 변화 방향을 비교하기 쉬워요.")
@@ -370,9 +365,4 @@ st.divider()
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
 - 지정 수가 변한 이유는 무엇일까? (학령인구 감소, 학교 통폐합 등)
-- 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
-- 사망자 수처럼 아주 작은 숫자의 변화는 어떻게 해석해야 할까?
-- 어린이 교통사고를 줄이기 위해 어떤 정책이 필요할까?
-""")
-
-st.caption("자료: 제공된 어린이보호구역 및 교통사고통계 CSV 파일")
+- 사고
