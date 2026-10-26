@@ -68,15 +68,60 @@ def find_year_col(df):
     return None
 
 
+def make_unique(columns):
+    """중복된 열 이름 뒤에 _1, _2를 붙여 고유하게 만든다."""
+    seen = {}
+    result = []
+    for c in columns:
+        c = str(c).strip()
+        if c in seen:
+            seen[c] += 1
+            result.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            result.append(c)
+    return result
+
+
 def prepare(df):
-    """열 이름 정리 + 연도가 열 이름이면 세로형으로 변환"""
+    """열 이름 정리 + '2022년 사고건수'처럼 연도가 열 이름에 있으면 세로형으로 변환"""
     df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    year_cols = [c for c in df.columns if re.match(r"^(19|20)\d{2}(\D|$)", c)]
-    if len(year_cols) >= 2:
-        id_cols = [c for c in df.columns if c not in year_cols]
-        df = df.melt(id_vars=id_cols, value_vars=year_cols, var_name="연도", value_name="값")
-    return df
+    df.columns = make_unique(df.columns)
+
+    year_cols = [c for c in df.columns if re.match(r"^(19|20)\d{2}", c)]
+    if len(year_cols) < 2:
+        return df
+
+    id_cols = [c for c in df.columns if c not in year_cols]
+    long = df.melt(
+        id_vars=id_cols,
+        value_vars=year_cols,
+        var_name="__열이름__",
+        value_name="__값__",
+        ignore_index=True,
+    )
+
+    # '2022년 사고건수' -> 연도=2022, 항목='사고건수'
+    parts = long["__열이름__"].str.extract(r"^((?:19|20)\d{2})\D*(.*)$")
+    long["__연도__"] = parts[0]
+    long["__항목__"] = parts[1].str.replace(r"_\d+$", "", regex=True).str.strip()
+
+    # 기존 열과 이름이 겹치지 않도록 정리
+    long = long.drop(columns=["__열이름__"])
+    for old in ["연도", "값"]:
+        if old in long.columns:
+            long = long.rename(columns={old: f"{old}_원본"})
+    long = long.rename(columns={"__연도__": "연도", "__값__": "값"})
+
+    # 항목 이름이 있으면 구분 열로 사용 (사고건수/사망자수/부상자수 등)
+    if (long["__항목__"] != "").any():
+        if "구분" in long.columns:
+            long = long.rename(columns={"구분": "구분_원본"})
+        long = long.rename(columns={"__항목__": "구분"})
+    else:
+        long = long.drop(columns=["__항목__"])
+
+    return long
 
 
 def keep_total_rows(df, skip):
