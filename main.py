@@ -12,14 +12,8 @@ st.set_page_config(
 )
 
 st.title("🚸 어린이보호구역 교통안전 분석")
-st.markdown("""
-CSV 자료를 이용해 어린이보호구역 지정 현황과 교통사고 변화를 분석합니다.
-왼쪽 사이드바에서 분석에 사용할 **열(컬럼)** 을 선택해 보세요.
-""")
+st.markdown("어린이보호구역 지정 현황과 교통사고 변화를 한눈에 살펴봅니다.")
 
-# -----------------------------
-# 데이터 주소
-# -----------------------------
 ZONE_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/main/161601_20261026083839280_excel.csv"
 TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/main/%EA%B5%90%ED%86%B5%EC%82%AC%EA%B3%A0%ED%86%B5%EA%B3%84_20261026.csv"
 
@@ -29,7 +23,6 @@ TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/ma
 # -----------------------------
 @st.cache_data
 def load_csv(url):
-    """인코딩을 바꿔가며 CSV를 읽어옵니다."""
     for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr"]:
         try:
             return pd.read_csv(url, encoding=enc)
@@ -39,7 +32,6 @@ def load_csv(url):
 
 
 def to_number(series):
-    """쉼표 등이 섞인 열을 숫자로 변환합니다."""
     return pd.to_numeric(
         series.astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
@@ -47,22 +39,54 @@ def to_number(series):
 
 
 def to_year(series):
-    """'2022', '2022년' 같은 값에서 4자리 연도를 추출합니다."""
     return pd.to_numeric(series.astype(str).str.extract(r"(\d{4})")[0], errors="coerce")
 
 
-def apply_filter(df, key, label):
-    """원하는 열의 값으로 데이터를 걸러냅니다(선택 사항)."""
-    filter_col = st.sidebar.selectbox(
-        f"{label} 필터 열 (선택)", ["(사용 안 함)"] + list(df.columns), key=f"{key}_fcol"
-    )
-    if filter_col != "(사용 안 함)":
-        options = df[filter_col].dropna().unique().tolist()
-        chosen = st.sidebar.multiselect(
-            f"{label} - '{filter_col}' 값 선택", options, default=options, key=f"{key}_fval"
-        )
-        df = df[df[filter_col].isin(chosen)]
+def find_year_col(df):
+    for c in df.columns:
+        if any(k in str(c) for k in ["연도", "년도", "기간", "year", "Year"]):
+            return c
+    for c in df.columns:
+        y = to_year(df[c])
+        if y.between(1990, 2100).mean() > 0.8:
+            return c
+    return None
+
+
+def wide_to_long(df):
+    """2022, 2023처럼 연도가 열 이름인 표를 세로형으로 바꿉니다."""
+    year_cols = [c for c in df.columns if str(c).strip()[:4].isdigit() and len(str(c).strip()) <= 6]
+    if not year_cols:
+        return None
+    id_cols = [c for c in df.columns if c not in year_cols]
+    long = df.melt(id_vars=id_cols, value_vars=year_cols, var_name="연도", value_name="값")
+    return long
+
+
+def keep_total_rows(df, skip_cols):
+    """'합계', '전국' 같은 총계 행이 있으면 그 행만 남겨 중복 합산을 막습니다."""
+    for c in df.columns:
+        if c in skip_cols or df[c].dtype != object:
+            continue
+        vals = df[c].astype(str).str.strip()
+        mask = vals.isin(["합계", "전국", "계", "전체", "총계"])
+        if mask.any():
+            df = df[mask]
     return df
+
+
+def find_value_col(df, keywords, exclude=()):
+    for kw in keywords:
+        for c in df.columns:
+            if c in exclude:
+                continue
+            if kw in str(c).replace(" ", "") and to_number(df[c]).notna().mean() > 0.5:
+                return c
+    return None
+
+
+def pct(a, b):
+    return (a - b) / b * 100 if b else 0
 
 
 # -----------------------------
@@ -75,203 +99,180 @@ if zone_raw is None or traffic_raw is None:
     st.error("CSV 파일을 불러오지 못했습니다. 주소와 인터넷 연결을 확인해 주세요.")
     st.stop()
 
-st.header("📂 원본 데이터 확인")
-with st.expander("어린이보호구역 CSV 보기"):
-    st.write(f"행 {zone_raw.shape[0]}개 × 열 {zone_raw.shape[1]}개")
-    st.dataframe(zone_raw, use_container_width=True)
-
-with st.expander("교통사고통계 CSV 보기"):
-    st.write(f"행 {traffic_raw.shape[0]}개 × 열 {traffic_raw.shape[1]}개")
-    st.dataframe(traffic_raw, use_container_width=True)
-
 # -----------------------------
-# 사이드바: 열 선택
+# 어린이보호구역 데이터 정리
 # -----------------------------
-st.sidebar.header("⚙️ 어린이보호구역 CSV 설정")
-zone_df = apply_filter(zone_raw, "zone", "보호구역")
-zone_year_col = st.sidebar.selectbox("연도 열", zone_df.columns, key="zone_year")
-zone_val_col = st.sidebar.selectbox(
-    "지정 수(값) 열", zone_df.columns, index=min(1, len(zone_df.columns) - 1), key="zone_val"
-)
+zone_year = find_year_col(zone_raw)
+if zone_year is not None:
+    zone_df = zone_raw.copy()
+    zone_val = find_value_col(zone_df, ["지정", "개소", "구역", "수", "합계"], exclude=[zone_year])
+    if zone_val is None:
+        nums = [c for c in zone_df.columns if c != zone_year and to_number(zone_df[c]).notna().mean() > 0.5]
+        zone_val = nums[-1] if nums else None
+else:
+    zone_df = wide_to_long(zone_raw)
+    zone_year, zone_val = "연도", "값"
 
-st.sidebar.header("⚙️ 교통사고통계 CSV 설정")
-traffic_df = apply_filter(traffic_raw, "traffic", "교통사고")
-traffic_year_col = st.sidebar.selectbox("연도 열 ", traffic_df.columns, key="traffic_year")
-traffic_val_cols = st.sidebar.multiselect(
-    "분석할 값 열 (사고 건수, 사망자 수, 부상자 수 등)",
-    [c for c in traffic_df.columns if c != traffic_year_col],
-    default=[],
-    key="traffic_vals",
-)
+if zone_df is None or zone_val is None:
+    st.error("어린이보호구역 CSV에서 연도와 지정 수 열을 찾지 못했습니다. 아래 열 이름을 알려주세요.")
+    st.write(list(zone_raw.columns))
+    st.stop()
 
-# -----------------------------
-# 데이터 정리
-# -----------------------------
+zone_df = keep_total_rows(zone_df, [zone_year, zone_val])
 zones = pd.DataFrame({
-    "연도": to_year(zone_df[zone_year_col]),
-    "어린이보호구역 지정 수": to_number(zone_df[zone_val_col]),
+    "연도": to_year(zone_df[zone_year]),
+    "지정 수": to_number(zone_df[zone_val]),
 }).dropna()
 zones["연도"] = zones["연도"].astype(int)
 zones = zones.groupby("연도", as_index=False).sum().sort_values("연도")
 
-traffic = pd.DataFrame()
-if traffic_val_cols:
-    traffic = pd.DataFrame({"연도": to_year(traffic_df[traffic_year_col])})
-    for c in traffic_val_cols:
-        traffic[c] = to_number(traffic_df[c])
-    traffic = traffic.dropna(subset=["연도"])
-    traffic["연도"] = traffic["연도"].astype(int)
-    traffic = traffic.groupby("연도", as_index=False).sum().sort_values("연도")
-
-if zones.empty:
-    st.warning("어린이보호구역 데이터에서 연도/값을 읽지 못했습니다. 사이드바에서 열을 다시 선택해 보세요.")
+# -----------------------------
+# 교통사고 데이터 정리
+# -----------------------------
+t_year = find_year_col(traffic_raw)
+if t_year is None:
+    st.error("교통사고 CSV에서 연도 열을 찾지 못했습니다. 아래 열 이름을 알려주세요.")
+    st.write(list(traffic_raw.columns))
     st.stop()
 
-if traffic.empty:
-    st.info("👈 사이드바에서 교통사고통계의 **연도 열**과 **분석할 값 열**을 선택해 주세요.")
+t_df = keep_total_rows(traffic_raw, [t_year])
+death_col = find_value_col(t_df, ["사망"], exclude=[t_year])
+injury_col = find_value_col(t_df, ["부상"], exclude=[t_year])
+acc_col = find_value_col(t_df, ["사고건수", "발생건수", "건수", "사고"], exclude=[t_year, death_col, injury_col])
+
+found = {"사고 건수": acc_col, "사망자 수": death_col, "부상자 수": injury_col}
+found = {k: v for k, v in found.items() if v is not None}
+
+if not found:
+    st.error("교통사고 CSV에서 사고/사망/부상 열을 찾지 못했습니다. 아래 열 이름을 알려주세요.")
+    st.write(list(traffic_raw.columns))
+    st.stop()
+
+traffic = pd.DataFrame({"연도": to_year(t_df[t_year])})
+for name, col in found.items():
+    traffic[name] = to_number(t_df[col])
+traffic = traffic.dropna(subset=["연도"])
+traffic["연도"] = traffic["연도"].astype(int)
+traffic = traffic.groupby("연도", as_index=False).sum().sort_values("연도")
+items = list(found.keys())
+
+# 두 자료에서 겹치는 연도만 사용
+common = sorted(set(zones["연도"]) & set(traffic["연도"]))
+if len(common) >= 2:
+    zones = zones[zones["연도"].isin(common)]
+    traffic = traffic[traffic["연도"].isin(common)]
+
+first_y, last_y = int(zones["연도"].iloc[0]), int(zones["연도"].iloc[-1])
+st.caption(f"분석 기간: {first_y}년 ~ {last_y}년")
 
 # -----------------------------
 # 핵심 수치
 # -----------------------------
-st.divider()
 st.header("📌 핵심 데이터")
+cols = st.columns(1 + len(items))
 
-latest_zone = zones.iloc[-1]
-first_zone = zones.iloc[0]
-
-metric_cols = st.columns(1 + len(traffic_val_cols)) if traffic_val_cols else st.columns(1)
-
-with metric_cols[0]:
-    st.metric(
-        f"{int(latest_zone['연도'])}년 보호구역 지정 수",
-        f"{latest_zone['어린이보호구역 지정 수']:,.0f}개",
-        delta=f"{latest_zone['어린이보호구역 지정 수'] - first_zone['어린이보호구역 지정 수']:+,.0f}개 ({int(first_zone['연도'])}년 대비)",
-    )
-
-if not traffic.empty:
-    for i, c in enumerate(traffic_val_cols):
-        with metric_cols[i + 1]:
-            latest = traffic.iloc[-1]
-            delta = None
-            if len(traffic) > 1:
-                delta = f"{latest[c] - traffic.iloc[-2][c]:+,.0f} (전년 대비)"
-            st.metric(f"{int(latest['연도'])}년 {c}", f"{latest[c]:,.0f}", delta=delta)
+z_last, z_first = zones["지정 수"].iloc[-1], zones["지정 수"].iloc[0]
+cols[0].metric(
+    f"{last_y}년 보호구역 지정 수",
+    f"{z_last:,.0f}개",
+    delta=f"{z_last - z_first:+,.0f}개 ({first_y}년 대비)",
+)
+for i, name in enumerate(items):
+    last = traffic[name].iloc[-1]
+    delta = None
+    if len(traffic) > 1:
+        delta = f"{last - traffic[name].iloc[-2]:+,.0f} (전년 대비)"
+    # 사고·사망·부상은 늘면 나쁜 것이므로 색을 반대로 표시
+    cols[i + 1].metric(f"{last_y}년 {name}", f"{last:,.0f}", delta=delta, delta_color="inverse")
 
 st.divider()
 
 # -----------------------------
-# 그래프 1: 보호구역 지정 현황
+# 그래프 (한 화면에 모두 표시)
 # -----------------------------
-st.header("1. 어린이보호구역 지정 현황")
+st.header("📊 한눈에 보는 그래프")
 
-fig1 = px.bar(
-    zones,
-    x="연도",
-    y="어린이보호구역 지정 수",
-    text="어린이보호구역 지정 수",
-    title="연도별 어린이보호구역 지정 현황",
-)
-fig1.update_traces(texttemplate="%{text:,}", textposition="outside")
-fig1.update_layout(xaxis=dict(type="category"))
-st.plotly_chart(fig1, use_container_width=True)
+def bar(df, col, title, color):
+    fig = px.bar(df, x="연도", y=col, text=col, title=title, color_discrete_sequence=[color])
+    fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+    fig.update_layout(xaxis=dict(type="category"), yaxis_title=None)
+    return fig
 
-# -----------------------------
-# 그래프 2~: 교통사고 항목별
-# -----------------------------
-if not traffic.empty:
-    for n, c in enumerate(traffic_val_cols, start=2):
-        st.divider()
-        st.header(f"{n}. 연도별 {c}")
-        fig = px.bar(
-            traffic,
-            x="연도",
-            y=c,
-            text=c,
-            title=f"연도별 {c}",
-        )
-        fig.update_traces(texttemplate="%{text:,}", textposition="outside")
-        fig.update_layout(xaxis=dict(type="category"))
-        st.plotly_chart(fig, use_container_width=True)
+colors = {"사고 건수": "#EF553B", "사망자 수": "#636EFA", "부상자 수": "#FFA15A"}
+charts = [("지정 수", zones, "연도별 어린이보호구역 지정 수", "#00CC96")]
+charts += [(n, traffic, f"연도별 {n}", colors[n]) for n in items]
 
-    # -------------------------
-    # 비교 그래프
-    # -------------------------
-    if len(traffic_val_cols) >= 2:
-        st.divider()
-        st.header(f"{len(traffic_val_cols) + 2}. 항목별 변화 비교")
+for i in range(0, len(charts), 2):
+    row = st.columns(2)
+    for j, (col, df, title, color) in enumerate(charts[i:i + 2]):
+        row[j].plotly_chart(bar(df, col, title, color), use_container_width=True)
 
-        traffic_long = traffic.melt(
-            id_vars="연도",
-            value_vars=traffic_val_cols,
-            var_name="항목",
-            value_name="값",
-        )
-        fig_line = px.line(
-            traffic_long,
-            x="연도",
-            y="값",
-            color="항목",
-            markers=True,
-            text="값",
-            title="연도별 항목 비교",
-        )
-        fig_line.update_traces(textposition="top center")
-        fig_line.update_layout(xaxis=dict(type="category"))
-        st.plotly_chart(fig_line, use_container_width=True)
+# 변화 추이 비교 (2025 기준 100으로 환산 → 시작 연도 = 100)
+st.subheader("📈 시작 연도를 100으로 놓고 본 변화율 비교")
+index_df = pd.DataFrame({"연도": zones["연도"].values})
+index_df["보호구역 지정 수"] = zones["지정 수"].values / zones["지정 수"].iloc[0] * 100
+tr = traffic.reset_index(drop=True)
+for n in items:
+    base = tr[n].iloc[0]
+    index_df[n] = tr[n] / base * 100 if base else None
 
-    # -------------------------
-    # 두 자료 합쳐서 비교
-    # -------------------------
-    st.divider()
-    st.header("🔗 보호구역 지정 수와 교통사고 함께 보기")
+long = index_df.melt(id_vars="연도", var_name="항목", value_name="지수")
+fig_idx = px.line(long, x="연도", y="지수", color="항목", markers=True,
+                  title=f"{first_y}년 = 100 기준 변화")
+fig_idx.update_layout(xaxis=dict(type="category"))
+st.plotly_chart(fig_idx, use_container_width=True)
+st.caption("단위가 서로 다른 항목도 같은 기준(시작 연도 = 100)으로 바꾸면 변화 방향을 비교하기 쉬워요.")
 
-    merged = pd.merge(zones, traffic, on="연도", how="inner")
-    if merged.empty:
-        st.info("두 자료에 겹치는 연도가 없어 합칠 수 없습니다.")
-    else:
-        st.dataframe(merged, hide_index=True, use_container_width=True)
-
-        target = st.selectbox("보호구역 지정 수와 비교할 항목", traffic_val_cols)
-        fig_sc = px.scatter(
-            merged,
-            x="어린이보호구역 지정 수",
-            y=target,
-            text="연도",
-            title=f"보호구역 지정 수와 {target}의 관계",
-        )
-        fig_sc.update_traces(textposition="top center", marker=dict(size=12))
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-        if len(merged) >= 3:
-            corr = merged["어린이보호구역 지정 수"].corr(merged[target])
-            st.write(f"상관계수: **{corr:.2f}**")
-        st.warning(
-            "주의: 두 값이 함께 변한다고 해서 한쪽이 다른 쪽의 원인이라고 단정할 수 없습니다. "
-            "차량 통행량, 안전시설 변화 등 다른 요인도 함께 생각해 보세요."
-        )
+st.divider()
 
 # -----------------------------
 # 데이터 표
 # -----------------------------
-st.divider()
 st.header("📋 정리된 데이터 표")
+merged = pd.merge(zones, traffic, on="연도", how="inner")
+st.dataframe(merged, hide_index=True, use_container_width=True)
 
-with st.expander("어린이보호구역 지정 현황 (연도별 합계)"):
-    st.dataframe(zones, hide_index=True, use_container_width=True)
-
-if not traffic.empty:
-    with st.expander("교통사고 현황 (연도별 합계)"):
-        st.dataframe(traffic, hide_index=True, use_container_width=True)
-
-# -----------------------------
-# 탐구 질문
-# -----------------------------
 st.divider()
+
+# -----------------------------
+# 자동 분석
+# -----------------------------
+st.header("🔍 데이터에서 발견한 점")
+
+diff = z_last - z_first
+trend = "증가" if diff > 0 else "감소" if diff < 0 else "변화 없음"
+st.subheader("1. 보호구역 지정 수")
+st.write(
+    f"어린이보호구역 지정 수는 {first_y}년 {z_first:,.0f}개에서 {last_y}년 {z_last:,.0f}개로 "
+    f"{abs(diff):,.0f}개({abs(pct(z_last, z_first)):.1f}%) **{trend}**했습니다."
+)
+
+for k, name in enumerate(items, start=2):
+    s = traffic[name].reset_index(drop=True)
+    yrs = traffic["연도"].reset_index(drop=True)
+    peak_y, low_y = int(yrs[s.idxmax()]), int(yrs[s.idxmin()])
+    d = s.iloc[-1] - s.iloc[0]
+    t = "증가" if d > 0 else "감소" if d < 0 else "변화 없음"
+    st.subheader(f"{k}. {name}")
+    line = " → ".join(f"{int(y)}년 {v:,.0f}" for y, v in zip(yrs, s))
+    st.write(
+        f"{line}\n\n"
+        f"{first_y}년 대비 {last_y}년에는 **{t}**({d:+,.0f}, {pct(s.iloc[-1], s.iloc[0]):+.1f}%)했고, "
+        f"가장 많았던 해는 **{peak_y}년**, 가장 적었던 해는 **{low_y}년**입니다."
+    )
+
+st.warning(
+    "주의: 이 데이터만으로 보호구역 지정 수의 변화가 교통사고 변화의 원인이라고 단정할 수 없습니다. "
+    "차량 통행량, 보호구역별 사고율, 안전시설 변화 등의 자료를 함께 분석해야 합니다."
+)
+
+st.divider()
+
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
-- 그래프에서 가장 크게 변한 해는 언제이고, 그 이유는 무엇일까?
-- 지역(시도)별로 필터를 바꾸면 결과가 어떻게 달라질까?
+- 지정 수가 변한 이유는 무엇일까? (학령인구 감소, 학교 통폐합 등)
 - 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
+- 사망자 수처럼 아주 작은 숫자의 변화는 어떻게 해석해야 할까?
 - 어린이 교통사고를 줄이기 위해 어떤 정책이 필요할까?
 """)
 
