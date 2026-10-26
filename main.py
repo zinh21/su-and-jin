@@ -54,6 +54,11 @@ def to_year(series):
     return pd.to_numeric(series.astype(str).str.extract(r"((?:19|20)\d{2})")[0], errors="coerce")
 
 
+def is_text(series):
+    """pandas 버전(object / str)과 상관없이 문자열 열인지 판단"""
+    return not pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
+
+
 def pct(a, b):
     return (a - b) / b * 100 if b else 0
 
@@ -72,10 +77,9 @@ def make_unique(columns):
 
 
 def clean_item(text):
-    """'2022년 사고건수', '2022.1' 같은 열 이름에서 항목 이름만 남긴다."""
     t = re.sub(YEAR_RE, "", str(text))
     t = re.sub(r"[._]\d+$", "", t)
-    t = t.replace("년", "", 1) if t.startswith("년") else t
+    t = t[1:] if t.startswith("년") else t
     return t.strip()
 
 
@@ -94,10 +98,10 @@ def to_long(df):
         items = {c: clean_item(c) for c in year_cols}
 
         # 첫 행에 항목 이름(사고건수 등)이 들어 있는 경우
-        first = df.iloc[0][year_cols] if len(df) else None
-        if first is not None:
-            is_text = to_number(first).isna() & first.astype(str).str.strip().ne("") & first.notna()
-            if is_text.mean() > 0.5:
+        if len(df):
+            first = df.iloc[0][year_cols]
+            is_txt = to_number(first).isna() & first.notna() & first.astype(str).str.strip().ne("")
+            if is_txt.mean() > 0.5:
                 items = {c: str(first[c]).strip() for c in year_cols}
                 df = df.iloc[1:].reset_index(drop=True)
 
@@ -140,7 +144,7 @@ def to_long(df):
 def keep_total_rows(df):
     """'합계', '전국' 같은 총계 행이 있으면 그 행만 남겨 중복 합산을 막는다."""
     for c in df.columns:
-        if c.startswith("__") or df[c].dtype != object:
+        if c.startswith("__") or not is_text(df[c]):
             continue
         mask = df[c].astype(str).str.strip().isin(TOTAL_WORDS)
         if mask.any():
@@ -165,23 +169,21 @@ def pick(long, keywords, exclude_kw=()):
         for item in long["__항목"].unique():
             n = norm(item)
             if kw in n and not any(e in n for e in exclude_kw):
-                sub = keep_total_rows(long[long["__항목"] == item])
-                s = yearly(sub)
+                s = yearly(keep_total_rows(long[long["__항목"] == item]))
                 if s is not None:
                     return s
 
     # ② 구분 열의 값에서 찾기
-    for c in long.columns:
-        if c.startswith("__") or long[c].dtype != object:
-            continue
-        vals = long[c].map(norm)
-        for kw in keywords:
+    for kw in keywords:
+        for c in long.columns:
+            if c.startswith("__") or not is_text(long[c]):
+                continue
+            vals = long[c].map(norm)
             mask = vals.str.contains(kw, regex=False)
             for e in exclude_kw:
                 mask &= ~vals.str.contains(e, regex=False)
             if mask.any():
-                sub = keep_total_rows(long[mask])
-                s = yearly(sub)
+                s = yearly(keep_total_rows(long[mask]))
                 if s is not None:
                     return s
     return None
@@ -190,6 +192,10 @@ def pick(long, keywords, exclude_kw=()):
 def show_structure(title, df):
     st.write(f"**{title}** 열 이름:", list(df.columns))
     st.dataframe(df.head(10), use_container_width=True)
+    for c in df.columns:
+        if is_text(df[c]):
+            vals = df[c].dropna().astype(str).unique()[:15]
+            st.write(f"`{c}` 열의 값 예시:", list(vals))
 
 
 # -----------------------------
