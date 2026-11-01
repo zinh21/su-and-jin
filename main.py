@@ -24,7 +24,6 @@ TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/ma
 TOTAL_WORDS = ["합계", "전국", "계", "전체", "총계"]
 YEAR_RE = r"^\s*((?:19|20)\d{2})"
 
-# 전처리 기록 (몇 개를 삭제했는지)
 clean_log = []
 
 
@@ -58,7 +57,6 @@ def to_year(series):
 
 
 def is_text(series):
-    """pandas 버전(object / str)과 상관없이 문자열 열인지 판단"""
     return not pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series)
 
 
@@ -86,27 +84,32 @@ def clean_item(text):
     return t.strip()
 
 
+def overview(df):
+    """행·열 개수, 열별 자료형, 빈 값 개수"""
+    return pd.DataFrame({
+        "열 이름": [str(c) for c in df.columns],
+        "자료형": [str(t) for t in df.dtypes],
+        "빈 값 개수": df.isna().sum().values,
+        "빈 값 비율(%)": (df.isna().mean() * 100).round(1).values,
+    })
+
+
 # -----------------------------
-# 세로형으로 통일 (결측치 삭제 포함)
+# 세로형 통일 + 결측치 삭제
 # -----------------------------
 def to_long(df, name):
     df = df.copy()
     df.columns = make_unique(df.columns)
-
     year_cols = [c for c in df.columns if re.match(YEAR_RE, c)]
-    long = None
 
-    # (A) 연도가 열 이름인 가로형
     if len(year_cols) >= 1:
         items = {c: clean_item(c) for c in year_cols}
-
         if len(df):
             first = df.iloc[0][year_cols]
             is_txt = to_number(first).isna() & first.notna() & first.astype(str).str.strip().ne("")
             if is_txt.mean() > 0.5:
                 items = {c: str(first[c]).strip() for c in year_cols}
                 df = df.iloc[1:].reset_index(drop=True)
-
         id_cols = [c for c in df.columns if c not in year_cols]
         parts = []
         for c in year_cols:
@@ -116,9 +119,7 @@ def to_long(df, name):
             tmp["__값"] = to_number(df[c])
             parts.append(tmp)
         long = pd.concat(parts, ignore_index=True)
-
     else:
-        # (B) 연도가 행(값)으로 들어 있는 세로형
         ycol = None
         for c in df.columns:
             if to_year(df[c]).notna().mean() > 0.6:
@@ -126,7 +127,6 @@ def to_long(df, name):
                 break
         if ycol is None:
             return None
-
         value_cols = [c for c in df.columns if c != ycol and to_number(df[c]).notna().mean() > 0.5]
         id_cols = [c for c in df.columns if c != ycol and c not in value_cols]
         parts = []
@@ -140,20 +140,21 @@ def to_long(df, name):
             return None
         long = pd.concat(parts, ignore_index=True)
 
-    # ---- 결측치 삭제 ----
     before = len(long)
     long = long.dropna(subset=["__연도", "__값"]).copy()
     long["__연도"] = long["__연도"].astype(int)
-    removed = before - len(long)
     clean_log.append({
-        "자료": name, "단계": "결측치 삭제",
-        "처리 전 행 수": before, "삭제된 행 수": removed, "처리 후 행 수": len(long),
+        "자료": name,
+        "단계": "결측치 처리",
+        "처리 방법": "숫자가 아니거나 빈 값인 행 삭제",
+        "처리 전 행 수": before,
+        "삭제된 행 수": before - len(long),
+        "처리 후 행 수": len(long),
     })
     return long
 
 
 def keep_total_rows(df):
-    """'합계', '전국' 같은 총계 행이 있으면 그 행만 남겨 중복 합산을 막는다."""
     for c in df.columns:
         if c.startswith("__") or not is_text(df[c]):
             continue
@@ -164,7 +165,6 @@ def keep_total_rows(df):
 
 
 def is_total_row(df):
-    """총계 행인지 표시하는 마스크"""
     mask = pd.Series(False, index=df.index)
     for c in df.columns:
         if c.startswith("__") or not is_text(df[c]):
@@ -177,16 +177,14 @@ def is_total_row(df):
 # 이상치 삭제 (IQR)
 # -----------------------------
 def remove_outliers(long, name):
-    """항목별로 IQR 방법을 적용해 이상치 행을 삭제한다. 총계 행은 보존."""
     if long is None or long.empty:
         return long
-
     total_mask = is_total_row(long)
     keep = pd.Series(True, index=long.index)
 
     for item, g in long.groupby("__항목"):
         detail = g[~total_mask.loc[g.index]]
-        if len(detail) < 4:          # 값이 너무 적으면 IQR이 의미 없음
+        if len(detail) < 4:
             continue
         q1, q3 = detail["__값"].quantile(0.25), detail["__값"].quantile(0.75)
         iqr = q3 - q1
@@ -197,8 +195,12 @@ def remove_outliers(long, name):
     before = len(long)
     cleaned = long[keep].copy()
     clean_log.append({
-        "자료": name, "단계": "이상치 삭제(IQR)",
-        "처리 전 행 수": before, "삭제된 행 수": before - len(cleaned), "처리 후 행 수": len(cleaned),
+        "자료": name,
+        "단계": "이상치 처리",
+        "처리 방법": "항목별 IQR(Q1-1.5×IQR ~ Q3+1.5×IQR) 밖의 세부 행 삭제, 총계 행 보존",
+        "처리 전 행 수": before,
+        "삭제된 행 수": before - len(cleaned),
+        "처리 후 행 수": len(cleaned),
     })
     return cleaned
 
@@ -210,7 +212,6 @@ def yearly(df):
 
 
 def pick(long, keywords, exclude_kw=()):
-    """항목 이름(또는 구분 열의 값)에서 키워드가 들어간 자료를 찾아 연도별 합계를 만든다."""
     if long is None:
         return None
     norm = lambda s: str(s).replace(" ", "")
@@ -248,7 +249,26 @@ def show_structure(title, df):
 
 
 # -----------------------------
-# 데이터 불러오기 + 전처리
+# 그래프별 발견 문장 (한 줄 + 근거 수치)
+# -----------------------------
+def finding(df, col, label, unit, bad_when_up=False):
+    s = df[col].reset_index(drop=True)
+    y = df["연도"].reset_index(drop=True)
+    first_v, last_v = s.iloc[0], s.iloc[-1]
+    d = last_v - first_v
+    word = "증가" if d > 0 else "감소" if d < 0 else "변화 없음"
+    peak_y, low_y = int(y[s.idxmax()]), int(y[s.idxmin()])
+    return (
+        f"🔎 **발견:** {label}은(는) {int(y.iloc[0])}년 대비 {int(y.iloc[-1])}년에 **{word}**했고 "
+        f"최댓값은 {peak_y}년입니다.  \n"
+        f"📎 **근거:** {int(y.iloc[0])}년 {first_v:,.0f}{unit} → {int(y.iloc[-1])}년 {last_v:,.0f}{unit} "
+        f"({d:+,.0f}{unit}, {pct(last_v, first_v):+.1f}%), "
+        f"최대 {s.max():,.0f}{unit}({peak_y}년), 최소 {s.min():,.0f}{unit}({low_y}년)"
+    )
+
+
+# -----------------------------
+# 데이터 불러오기
 # -----------------------------
 zone_raw = load_csv(ZONE_URL)
 traffic_raw = load_csv(TRAFFIC_URL)
@@ -257,8 +277,37 @@ if zone_raw is None or traffic_raw is None:
     st.error("CSV 파일을 불러오지 못했습니다. 인터넷 연결과 주소(공개 저장소인지)를 확인해 주세요.")
     st.stop()
 
+# -----------------------------
+# 1. 데이터 개요
+# -----------------------------
+st.header("🗂️ 데이터 개요")
+ov1, ov2 = st.columns(2)
+for box, title, df in [(ov1, "어린이보호구역 CSV", zone_raw), (ov2, "교통사고통계 CSV", traffic_raw)]:
+    with box:
+        st.subheader(title)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("행 개수", f"{df.shape[0]:,}")
+        m2.metric("열 개수", f"{df.shape[1]:,}")
+        m3.metric("빈 값 총합", f"{int(df.isna().sum().sum()):,}")
+        st.dataframe(overview(df), hide_index=True, use_container_width=True)
+
+st.divider()
+
+# -----------------------------
+# 전처리
+# -----------------------------
 zone_long = remove_outliers(to_long(zone_raw, "어린이보호구역"), "어린이보호구역")
 traffic_long = remove_outliers(to_long(traffic_raw, "교통사고"), "교통사고")
+
+st.header("🧹 결측치·이상치 처리 결과")
+if clean_log:
+    st.dataframe(pd.DataFrame(clean_log), hide_index=True, use_container_width=True)
+st.caption(
+    "결측치는 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. "
+    "이상치는 항목별 IQR 범위를 벗어난 세부 행을 삭제했고, 합계·전국 같은 총계 행은 보존했습니다."
+)
+
+st.divider()
 
 # -----------------------------
 # 어린이보호구역 지정 수
@@ -276,7 +325,7 @@ if zone_series is None or len(zone_series) == 0:
 zones = zone_series.rename("지정 수").reset_index().rename(columns={"__연도": "연도"})
 
 # -----------------------------
-# 교통사고 (사고 건수 / 사망자 수 / 부상자 수)
+# 교통사고
 # -----------------------------
 death = pick(traffic_long, ["사망"])
 injury = pick(traffic_long, ["부상"])
@@ -304,17 +353,6 @@ if len(common) >= 1:
 first_y, last_y = int(traffic["연도"].iloc[0]), int(traffic["연도"].iloc[-1])
 st.caption(f"분석 기간: {first_y}년 ~ {last_y}년")
 
-# -----------------------------
-# 전처리 결과 (결측치·이상치 삭제 기록)
-# -----------------------------
-with st.expander("🧹 결측치·이상치 삭제 결과 보기"):
-    st.dataframe(pd.DataFrame(clean_log), hide_index=True, use_container_width=True)
-    st.caption(
-        "결측치: 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. "
-        "이상치: 항목별 IQR(Q1-1.5×IQR ~ Q3+1.5×IQR) 범위를 벗어난 세부 행을 삭제했고, "
-        "합계·전국 같은 총계 행은 보존했습니다."
-    )
-
 with st.expander("🔧 원본 CSV 구조 확인 (문제가 있을 때 열어 보세요)"):
     show_structure("어린이보호구역 CSV", zone_raw)
     show_structure("교통사고 CSV", traffic_raw)
@@ -341,9 +379,9 @@ for i, name in enumerate(items):
 st.divider()
 
 # -----------------------------
-# 그래프
+# 그래프 + 발견 문장
 # -----------------------------
-st.header("📊 한눈에 보는 그래프")
+st.header("📊 그래프와 발견한 점")
 
 
 def bar(df, col, title, color):
@@ -354,14 +392,18 @@ def bar(df, col, title, color):
 
 
 colors = {"사고 건수": "#EF553B", "사망자 수": "#636EFA", "부상자 수": "#FFA15A"}
-charts = [("지정 수", zones, "연도별 어린이보호구역 지정 수", "#00CC96")]
-charts += [(n, traffic, f"연도별 {n}", colors[n]) for n in items]
+units = {"지정 수": "개", "사고 건수": "건", "사망자 수": "명", "부상자 수": "명"}
+charts = [("지정 수", zones, "연도별 어린이보호구역 지정 수", "#00CC96", "보호구역 지정 수")]
+charts += [(n, traffic, f"연도별 {n}", colors[n], n) for n in items]
 
 for i in range(0, len(charts), 2):
     row = st.columns(2)
-    for j, (col, df, title, color) in enumerate(charts[i:i + 2]):
-        row[j].plotly_chart(bar(df, col, title, color), use_container_width=True)
+    for j, (col, df, title, color, label) in enumerate(charts[i:i + 2]):
+        with row[j]:
+            st.plotly_chart(bar(df, col, title, color), use_container_width=True)
+            st.info(finding(df, col, label, units[col]))
 
+# 변화율 비교
 st.subheader("📈 시작 연도를 100으로 놓고 본 변화율 비교")
 merged = pd.merge(zones, traffic, on="연도", how="inner")
 if len(merged) >= 2:
@@ -377,7 +419,15 @@ if len(merged) >= 2:
     )
     fig_idx.update_layout(xaxis=dict(type="category"))
     st.plotly_chart(fig_idx, use_container_width=True)
-    st.caption("단위가 다른 항목도 같은 기준(시작 연도 = 100)으로 바꾸면 변화 방향을 비교하기 쉬워요.")
+
+    last_idx = idx.iloc[-1].drop("연도").astype(float)
+    top, bottom = last_idx.idxmax(), last_idx.idxmin()
+    detail = ", ".join(f"{k} {v:.1f}" for k, v in last_idx.items())
+    st.info(
+        f"🔎 **발견:** {int(idx['연도'].iloc[-1])}년 기준 가장 많이 오른(또는 덜 줄어든) 항목은 **{top}**, "
+        f"가장 많이 줄어든 항목은 **{bottom}**입니다.  \n"
+        f"📎 **근거:** 시작 연도=100일 때 {detail}"
+    )
 else:
     st.info("두 자료에 겹치는 연도가 2개 미만이라 변화율 비교는 생략했습니다.")
 
@@ -389,36 +439,6 @@ st.divider()
 st.header("📋 정리된 데이터 표")
 st.dataframe(merged if not merged.empty else traffic, hide_index=True, use_container_width=True)
 
-st.divider()
-
-# -----------------------------
-# 자동 분석
-# -----------------------------
-st.header("🔍 데이터에서 발견한 점")
-
-diff = z_last - z_first
-trend = "증가" if diff > 0 else "감소" if diff < 0 else "변화 없음"
-st.subheader("1. 보호구역 지정 수")
-st.write(
-    f"어린이보호구역 지정 수는 {int(zones['연도'].iloc[0])}년 {z_first:,.0f}개에서 "
-    f"{int(zones['연도'].iloc[-1])}년 {z_last:,.0f}개로 "
-    f"{abs(diff):,.0f}개({abs(pct(z_last, z_first)):.1f}%) **{trend}**했습니다."
-)
-
-for k, name in enumerate(items, start=2):
-    s = traffic[name].reset_index(drop=True)
-    yrs = traffic["연도"].reset_index(drop=True)
-    peak_y, low_y = int(yrs[s.idxmax()]), int(yrs[s.idxmin()])
-    d = s.iloc[-1] - s.iloc[0]
-    t = "증가" if d > 0 else "감소" if d < 0 else "변화 없음"
-    st.subheader(f"{k}. {name}")
-    line = " → ".join(f"{int(y)}년 {v:,.0f}" for y, v in zip(yrs, s))
-    st.write(
-        f"{line}\n\n"
-        f"{first_y}년 대비 {last_y}년에는 **{t}**({d:+,.0f}, {pct(s.iloc[-1], s.iloc[0]):+.1f}%)했고, "
-        f"가장 많았던 해는 **{peak_y}년**, 가장 적었던 해는 **{low_y}년**입니다."
-    )
-
 st.warning(
     "주의: 이 데이터만으로 보호구역 지정 수의 변화가 교통사고 변화의 원인이라고 단정할 수 없습니다. "
     "차량 통행량, 보호구역별 사고율, 안전시설 변화 등의 자료를 함께 분석해야 합니다."
@@ -428,7 +448,7 @@ st.divider()
 
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
-- 결측치와 이상치를 삭제하기 전과 후에 그래프가 어떻게 달라졌을까?
+- 결측치와 이상치를 삭제하기 전과 후에 그래프가 어떻게 달라질까?
 - 이상치로 삭제된 행은 정말 잘못된 값일까, 아니면 실제로 중요한 사건일까?
 - 지정 수가 변한 이유는 무엇일까? (학령인구 감소, 학교 통폐합 등)
 - 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
