@@ -24,6 +24,9 @@ TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/ma
 TOTAL_WORDS = ["합계", "전국", "계", "전체", "총계"]
 YEAR_RE = r"^\s*((?:19|20)\d{2})"
 
+# 전처리 기록 (몇 개를 삭제했는지)
+clean_log = []
+
 
 # -----------------------------
 # 기본 함수
@@ -84,20 +87,19 @@ def clean_item(text):
 
 
 # -----------------------------
-# 어떤 모양의 표든 세로형으로 통일
-# 결과 열: __연도, __항목, __값 + 나머지 구분 열
+# 세로형으로 통일 (결측치 삭제 포함)
 # -----------------------------
-def to_long(df):
+def to_long(df, name):
     df = df.copy()
     df.columns = make_unique(df.columns)
 
     year_cols = [c for c in df.columns if re.match(YEAR_RE, c)]
+    long = None
 
     # (A) 연도가 열 이름인 가로형
     if len(year_cols) >= 1:
         items = {c: clean_item(c) for c in year_cols}
 
-        # 첫 행에 항목 이름(사고건수 등)이 들어 있는 경우
         if len(df):
             first = df.iloc[0][year_cols]
             is_txt = to_number(first).isna() & first.notna() & first.astype(str).str.strip().ne("")
@@ -114,30 +116,39 @@ def to_long(df):
             tmp["__값"] = to_number(df[c])
             parts.append(tmp)
         long = pd.concat(parts, ignore_index=True)
-        return long.dropna(subset=["__값"])
 
-    # (B) 연도가 행(값)으로 들어 있는 세로형
-    ycol = None
-    for c in df.columns:
-        if to_year(df[c]).notna().mean() > 0.6:
-            ycol = c
-            break
-    if ycol is None:
-        return None
+    else:
+        # (B) 연도가 행(값)으로 들어 있는 세로형
+        ycol = None
+        for c in df.columns:
+            if to_year(df[c]).notna().mean() > 0.6:
+                ycol = c
+                break
+        if ycol is None:
+            return None
 
-    value_cols = [c for c in df.columns if c != ycol and to_number(df[c]).notna().mean() > 0.5]
-    id_cols = [c for c in df.columns if c != ycol and c not in value_cols]
-    parts = []
-    for c in value_cols:
-        tmp = df[id_cols].copy()
-        tmp["__연도"] = to_year(df[ycol])
-        tmp["__항목"] = c.strip()
-        tmp["__값"] = to_number(df[c])
-        parts.append(tmp)
-    if not parts:
-        return None
-    long = pd.concat(parts, ignore_index=True).dropna(subset=["__연도", "__값"])
+        value_cols = [c for c in df.columns if c != ycol and to_number(df[c]).notna().mean() > 0.5]
+        id_cols = [c for c in df.columns if c != ycol and c not in value_cols]
+        parts = []
+        for c in value_cols:
+            tmp = df[id_cols].copy()
+            tmp["__연도"] = to_year(df[ycol])
+            tmp["__항목"] = c.strip()
+            tmp["__값"] = to_number(df[c])
+            parts.append(tmp)
+        if not parts:
+            return None
+        long = pd.concat(parts, ignore_index=True)
+
+    # ---- 결측치 삭제 ----
+    before = len(long)
+    long = long.dropna(subset=["__연도", "__값"]).copy()
     long["__연도"] = long["__연도"].astype(int)
+    removed = before - len(long)
+    clean_log.append({
+        "자료": name, "단계": "결측치 삭제",
+        "처리 전 행 수": before, "삭제된 행 수": removed, "처리 후 행 수": len(long),
+    })
     return long
 
 
@@ -152,6 +163,46 @@ def keep_total_rows(df):
     return df
 
 
+def is_total_row(df):
+    """총계 행인지 표시하는 마스크"""
+    mask = pd.Series(False, index=df.index)
+    for c in df.columns:
+        if c.startswith("__") or not is_text(df[c]):
+            continue
+        mask |= df[c].astype(str).str.strip().isin(TOTAL_WORDS)
+    return mask
+
+
+# -----------------------------
+# 이상치 삭제 (IQR)
+# -----------------------------
+def remove_outliers(long, name):
+    """항목별로 IQR 방법을 적용해 이상치 행을 삭제한다. 총계 행은 보존."""
+    if long is None or long.empty:
+        return long
+
+    total_mask = is_total_row(long)
+    keep = pd.Series(True, index=long.index)
+
+    for item, g in long.groupby("__항목"):
+        detail = g[~total_mask.loc[g.index]]
+        if len(detail) < 4:          # 값이 너무 적으면 IQR이 의미 없음
+            continue
+        q1, q3 = detail["__값"].quantile(0.25), detail["__값"].quantile(0.75)
+        iqr = q3 - q1
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        out_idx = detail.index[(detail["__값"] < lower) | (detail["__값"] > upper)]
+        keep.loc[out_idx] = False
+
+    before = len(long)
+    cleaned = long[keep].copy()
+    clean_log.append({
+        "자료": name, "단계": "이상치 삭제(IQR)",
+        "처리 전 행 수": before, "삭제된 행 수": before - len(cleaned), "처리 후 행 수": len(cleaned),
+    })
+    return cleaned
+
+
 def yearly(df):
     if df is None or df.empty:
         return None
@@ -164,7 +215,6 @@ def pick(long, keywords, exclude_kw=()):
         return None
     norm = lambda s: str(s).replace(" ", "")
 
-    # ① 항목 이름에서 찾기
     for kw in keywords:
         for item in long["__항목"].unique():
             n = norm(item)
@@ -173,7 +223,6 @@ def pick(long, keywords, exclude_kw=()):
                 if s is not None:
                     return s
 
-    # ② 구분 열의 값에서 찾기
     for kw in keywords:
         for c in long.columns:
             if c.startswith("__") or not is_text(long[c]):
@@ -199,7 +248,7 @@ def show_structure(title, df):
 
 
 # -----------------------------
-# 데이터 불러오기
+# 데이터 불러오기 + 전처리
 # -----------------------------
 zone_raw = load_csv(ZONE_URL)
 traffic_raw = load_csv(TRAFFIC_URL)
@@ -208,8 +257,8 @@ if zone_raw is None or traffic_raw is None:
     st.error("CSV 파일을 불러오지 못했습니다. 인터넷 연결과 주소(공개 저장소인지)를 확인해 주세요.")
     st.stop()
 
-zone_long = to_long(zone_raw)
-traffic_long = to_long(traffic_raw)
+zone_long = remove_outliers(to_long(zone_raw, "어린이보호구역"), "어린이보호구역")
+traffic_long = remove_outliers(to_long(traffic_raw, "교통사고"), "교통사고")
 
 # -----------------------------
 # 어린이보호구역 지정 수
@@ -247,7 +296,6 @@ traffic = pd.DataFrame(found).sort_index().reset_index()
 traffic = traffic.rename(columns={traffic.columns[0]: "연도"})
 items = list(found.keys())
 
-# 두 자료에서 겹치는 연도만 사용
 common = sorted(set(zones["연도"]) & set(traffic["연도"]))
 if len(common) >= 1:
     zones = zones[zones["연도"].isin(common)].reset_index(drop=True)
@@ -255,6 +303,17 @@ if len(common) >= 1:
 
 first_y, last_y = int(traffic["연도"].iloc[0]), int(traffic["연도"].iloc[-1])
 st.caption(f"분석 기간: {first_y}년 ~ {last_y}년")
+
+# -----------------------------
+# 전처리 결과 (결측치·이상치 삭제 기록)
+# -----------------------------
+with st.expander("🧹 결측치·이상치 삭제 결과 보기"):
+    st.dataframe(pd.DataFrame(clean_log), hide_index=True, use_container_width=True)
+    st.caption(
+        "결측치: 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. "
+        "이상치: 항목별 IQR(Q1-1.5×IQR ~ Q3+1.5×IQR) 범위를 벗어난 세부 행을 삭제했고, "
+        "합계·전국 같은 총계 행은 보존했습니다."
+    )
 
 with st.expander("🔧 원본 CSV 구조 확인 (문제가 있을 때 열어 보세요)"):
     show_structure("어린이보호구역 CSV", zone_raw)
@@ -303,7 +362,6 @@ for i in range(0, len(charts), 2):
     for j, (col, df, title, color) in enumerate(charts[i:i + 2]):
         row[j].plotly_chart(bar(df, col, title, color), use_container_width=True)
 
-# 변화율 비교
 st.subheader("📈 시작 연도를 100으로 놓고 본 변화율 비교")
 merged = pd.merge(zones, traffic, on="연도", how="inner")
 if len(merged) >= 2:
@@ -370,10 +428,10 @@ st.divider()
 
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
+- 결측치와 이상치를 삭제하기 전과 후에 그래프가 어떻게 달라졌을까?
+- 이상치로 삭제된 행은 정말 잘못된 값일까, 아니면 실제로 중요한 사건일까?
 - 지정 수가 변한 이유는 무엇일까? (학령인구 감소, 학교 통폐합 등)
 - 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
-- 사망자 수처럼 아주 작은 숫자의 변화는 어떻게 해석해야 할까?
-- 어린이 교통사고를 줄이기 위해 어떤 정책이 필요할까?
 """)
 
 st.caption("자료: 제공된 어린이보호구역 및 교통사고통계 CSV 파일")
