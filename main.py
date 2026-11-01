@@ -25,9 +25,11 @@ TRAFFIC_URL = "https://raw.githubusercontent.com/zinh21/su-and-jin/refs/heads/ma
 TOTAL_WORDS = ["합계", "전국", "계", "전체", "총계"]
 YEAR_RE = r"^\s*((?:19|20)\d{2})"
 MISSING_MARKS = {"", "-", "–", "—", "…", "N/A", "n/a", "NA", "nan", "NaN", "None", "해당없음", "없음"}
-FFILL_NAME_HINTS = ["시도", "연도", "구분", "항목", "분류", "지역"]   # 병합 셀로 자주 쓰이는 열 (시군구는 제외)
+FFILL_NAME_HINTS = ["시도", "연도", "구분", "항목", "분류", "지역"]
 
 clean_log = []
+removed_missing = {}
+removed_outliers = {}
 
 
 # -----------------------------
@@ -95,7 +97,6 @@ def load_bytes(url):
 
 
 def read_plain(content):
-    """정리 전(원본 그대로) 읽기 - 비교용"""
     for enc in ["utf-8-sig", "cp949", "euc-kr"]:
         try:
             return pd.read_csv(BytesIO(content), encoding=enc)
@@ -105,7 +106,6 @@ def read_plain(content):
 
 
 def fix_structure(content):
-    """제목 줄, 병합 셀, 들쭉날쭉한 열 개수, '-' 표기, 빈 행·열을 정리한다."""
     text = None
     for enc in ["utf-8-sig", "cp949", "euc-kr"]:
         try:
@@ -120,17 +120,14 @@ def fix_structure(content):
     if not rows:
         return None, {}
 
-    # 1) 줄마다 열 개수가 달라도 가장 긴 줄에 맞춰 채움
     width = max(len(r) for r in rows)
     rows = [[c.strip() for c in r] + [""] * (width - len(r)) for r in rows]
     raw = pd.DataFrame(rows).replace(list(MISSING_MARKS), pd.NA)
 
     info = {"원본 줄 수": len(raw)}
 
-    # 2) 완전히 빈 행·열 삭제
     raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
 
-    # 3) 진짜 열 이름 줄 찾기 (앞 10줄 중 값이 충분히 채워진 첫 줄)
     max_filled = raw.head(10).notna().sum(axis=1).max()
     header_idx = 0
     for i in range(min(10, len(raw))):
@@ -144,9 +141,9 @@ def fix_structure(content):
     df = raw.iloc[header_idx + 1:].reset_index(drop=True)
     df.columns = make_unique(header)
 
-    # 4) 병합 셀 채우기: 시도/연도/구분 같은 열만 위 값으로 채움
     filled = []
-    text_cols = [c for c in df.columns if to_number(df[c].dropna()).notna().mean() < 0.5 if df[c].notna().any()]
+    text_cols = [c for c in df.columns
+                 if df[c].notna().any() and to_number(df[c].dropna()).notna().mean() < 0.5]
     for i, c in enumerate(text_cols):
         if i == 0 or any(h in c for h in FFILL_NAME_HINTS):
             before = int(df[c].isna().sum())
@@ -155,7 +152,6 @@ def fix_structure(content):
                 filled.append(c)
     info["병합 셀로 보고 채운 열"] = ", ".join(filled) if filled else "없음"
 
-    # 5) 숫자 열은 숫자형으로 변환
     for c in df.columns:
         nn = df[c].dropna()
         if len(nn) and to_number(nn).notna().mean() >= 0.9:
@@ -165,6 +161,9 @@ def fix_structure(content):
     return df, info
 
 
+# -----------------------------
+# 세로형 변환 + 결측치 삭제
+# -----------------------------
 def to_long(df, name):
     df = df.copy()
     df.columns = make_unique(df.columns)
@@ -209,7 +208,9 @@ def to_long(df, name):
         long = pd.concat(parts, ignore_index=True)
 
     before = len(long)
-    long = long.dropna(subset=["__연도", "__값"]).copy()
+    missing_mask = long["__연도"].isna() | long["__값"].isna()
+    removed_missing[name] = long[missing_mask].copy()
+    long = long[~missing_mask].copy()
     long["__연도"] = long["__연도"].astype(int)
     clean_log.append({
         "자료": name, "단계": "결측치 처리",
@@ -252,6 +253,7 @@ def remove_outliers(long, name):
         lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
         keep.loc[detail.index[(detail["__값"] < lower) | (detail["__값"] > upper)]] = False
     before = len(long)
+    removed_outliers[name] = long[~keep].copy()
     cleaned = long[keep].copy()
     clean_log.append({
         "자료": name, "단계": "이상치 처리",
@@ -336,7 +338,7 @@ if zone_raw is None or traffic_raw is None:
     st.stop()
 
 # -----------------------------
-# 데이터 개요 (구조 정리 전/후 비교)
+# 데이터 개요
 # -----------------------------
 st.header("🗂️ 데이터 개요")
 st.caption("파일 구조를 정리한 뒤의 값입니다. 정리 전 빈 값과 비교해 보세요.")
@@ -372,6 +374,18 @@ st.caption(
     "결측치는 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. "
     "이상치는 항목별 IQR 범위를 벗어난 세부 행을 삭제했고, 합계·전국 같은 총계 행은 보존했습니다."
 )
+
+for name in ["어린이보호구역", "교통사고"]:
+    with st.expander(f"🗑️ {name}: 삭제된 행 보기"):
+        miss_df = removed_missing.get(name)
+        out_df = removed_outliers.get(name)
+        st.write(f"결측치로 삭제된 행: {0 if miss_df is None else len(miss_df):,}개 (앞 50개만 표시)")
+        if miss_df is not None and len(miss_df):
+            st.dataframe(miss_df.head(50), use_container_width=True)
+        st.write(f"이상치로 삭제된 행: {0 if out_df is None else len(out_df):,}개 (앞 50개만 표시)")
+        if out_df is not None and len(out_df):
+            st.dataframe(out_df.head(50), use_container_width=True)
+
 st.divider()
 
 # -----------------------------
@@ -502,7 +516,7 @@ st.warning(
 st.divider()
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
-- 구조를 정리하기 전과 후에 빈 값 개수는 얼마나 달라졌을까?
+- 삭제된 행은 어떤 지역·연도·항목에 몰려 있을까?
 - 남은 빈 값은 '0건'일까, '자료 없음'일까?
 - 이상치로 삭제된 행은 정말 잘못된 값일까, 실제로 중요한 사건일까?
 - 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
