@@ -29,7 +29,6 @@ FFILL_NAME_HINTS = ["시도", "연도", "구분", "항목", "분류", "지역"]
 
 clean_log = []
 removed_missing = {}
-removed_outliers = {}
 
 
 # -----------------------------
@@ -230,39 +229,6 @@ def keep_total_rows(df):
     return df
 
 
-def is_total_row(df):
-    mask = pd.Series(False, index=df.index)
-    for c in df.columns:
-        if c.startswith("__") or not is_text(df[c]):
-            continue
-        mask |= df[c].astype(str).str.strip().isin(TOTAL_WORDS)
-    return mask
-
-
-def remove_outliers(long, name):
-    if long is None or long.empty:
-        return long
-    total_mask = is_total_row(long)
-    keep = pd.Series(True, index=long.index)
-    for item, g in long.groupby("__항목"):
-        detail = g[~total_mask.loc[g.index]]
-        if len(detail) < 4:
-            continue
-        q1, q3 = detail["__값"].quantile(0.25), detail["__값"].quantile(0.75)
-        iqr = q3 - q1
-        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        keep.loc[detail.index[(detail["__값"] < lower) | (detail["__값"] > upper)]] = False
-    before = len(long)
-    removed_outliers[name] = long[~keep].copy()
-    cleaned = long[keep].copy()
-    clean_log.append({
-        "자료": name, "단계": "이상치 처리",
-        "처리 방법": "항목별 IQR(Q1-1.5×IQR ~ Q3+1.5×IQR) 밖의 세부 행 삭제, 총계 행 보존",
-        "처리 전 행 수": before, "삭제된 행 수": before - len(cleaned), "처리 후 행 수": len(cleaned),
-    })
-    return cleaned
-
-
 def yearly(df):
     if df is None or df.empty:
         return None
@@ -362,29 +328,22 @@ for title, plain, fixed, info in [
 st.divider()
 
 # -----------------------------
-# 전처리 (결측치·이상치)
+# 전처리 (결측치만 삭제)
 # -----------------------------
-zone_long = remove_outliers(to_long(zone_raw, "어린이보호구역"), "어린이보호구역")
-traffic_long = remove_outliers(to_long(traffic_raw, "교통사고"), "교통사고")
+zone_long = to_long(zone_raw, "어린이보호구역")
+traffic_long = to_long(traffic_raw, "교통사고")
 
-st.header("🧹 결측치·이상치 처리 결과")
+st.header("🧹 결측치 처리 결과")
 if clean_log:
     st.dataframe(pd.DataFrame(clean_log), hide_index=True, use_container_width=True)
-st.caption(
-    "결측치는 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. "
-    "이상치는 항목별 IQR 범위를 벗어난 세부 행을 삭제했고, 합계·전국 같은 총계 행은 보존했습니다."
-)
+st.caption("결측치는 숫자가 아니거나 비어 있는 값의 행을 삭제했습니다. 이상치는 처리하지 않았습니다.")
 
 for name in ["어린이보호구역", "교통사고"]:
     with st.expander(f"🗑️ {name}: 삭제된 행 보기"):
         miss_df = removed_missing.get(name)
-        out_df = removed_outliers.get(name)
         st.write(f"결측치로 삭제된 행: {0 if miss_df is None else len(miss_df):,}개 (앞 50개만 표시)")
         if miss_df is not None and len(miss_df):
             st.dataframe(miss_df.head(50), use_container_width=True)
-        st.write(f"이상치로 삭제된 행: {0 if out_df is None else len(out_df):,}개 (앞 50개만 표시)")
-        if out_df is not None and len(out_df):
-            st.dataframe(out_df.head(50), use_container_width=True)
 
 st.divider()
 
@@ -516,9 +475,9 @@ st.warning(
 st.divider()
 st.header("💡 더 탐구해 볼 질문")
 st.markdown("""
-- 삭제된 행은 어떤 지역·연도·항목에 몰려 있을까?
+- 삭제된 결측치 행은 어떤 지역·연도·항목에 몰려 있을까?
 - 남은 빈 값은 '0건'일까, '자료 없음'일까?
-- 이상치로 삭제된 행은 정말 잘못된 값일까, 실제로 중요한 사건일까?
+- 이상치를 따로 처리하지 않았을 때 결과 해석에 어떤 영향이 있을까?
 - 사고 건수뿐 아니라 차량 통행량을 고려하면 결론이 달라질까?
 """)
 
