@@ -482,3 +482,188 @@ st.markdown("""
 """)
 
 st.caption("자료: 제공된 어린이보호구역 및 교통사고통계 CSV 파일")
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from sklearn.compose import ColumnTransformer
+from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix, recall_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+st.set_page_config(page_title="Stroke 예측 베이스라인", page_icon="🧱", layout="wide")
+st.title("🧱 Stroke 예측: 베이스라인과 모델 비교")
+st.markdown("가장 단순한 기준(베이스라인)과 모델의 **정확도·재현율**을 같은 조건에서 비교합니다.")
+
+# -----------------------------
+# 1. 데이터 불러오기
+# -----------------------------
+uploaded = st.file_uploader("stroke 데이터 CSV 업로드 (예: healthcare-dataset-stroke-data.csv)", type="csv")
+if uploaded is None:
+    st.info("CSV 파일을 업로드하면 분석이 시작됩니다.")
+    st.stop()
+
+df = pd.read_csv(uploaded)
+st.subheader("🗂️ 데이터 미리보기")
+st.dataframe(df.head(), use_container_width=True)
+
+target = st.selectbox(
+    "예측할 열(타깃)",
+    df.columns,
+    index=list(df.columns).index("stroke") if "stroke" in df.columns else len(df.columns) - 1,
+)
+
+# id처럼 예측과 무관한 열 제거
+drop_cols = [c for c in df.columns if c.lower() == "id"]
+df = df.drop(columns=drop_cols)
+df = df.dropna(subset=[target])
+y = df[target]
+X = df.drop(columns=[target])
+
+if y.nunique() != 2:
+    st.error("타깃 열은 값이 2종류(있음/없음)여야 합니다.")
+    st.stop()
+
+# -----------------------------
+# 2. 클래스 비율 확인
+# -----------------------------
+st.subheader("⚖️ 클래스 비율")
+counts = y.value_counts().sort_index()
+c1, c2 = st.columns(2)
+c1.dataframe(
+    pd.DataFrame({"값": counts.index, "개수": counts.values,
+                  "비율(%)": (counts.values / counts.sum() * 100).round(2)}),
+    hide_index=True, use_container_width=True,
+)
+fig_cls = px.bar(x=counts.index.astype(str), y=counts.values, text=counts.values,
+                 labels={"x": target, "y": "개수"}, title="클래스별 개수")
+c2.plotly_chart(fig_cls, use_container_width=True)
+
+# -----------------------------
+# 3. 동일한 분할 (공정한 비교)
+# -----------------------------
+test_size = st.slider("테스트 데이터 비율", 0.1, 0.4, 0.2, 0.05)
+seed = st.number_input("random_state", value=42, step=1)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=test_size, stratify=y, random_state=int(seed)
+)
+st.caption(f"학습 {len(X_train):,}개 / 테스트 {len(X_test):,}개 (층화 추출, 모든 모델 동일 분할)")
+
+# -----------------------------
+# 4. 전처리 (Pipeline 안에서 학습 데이터로만 학습 → 데이터 누수 방지)
+# -----------------------------
+num_cols = X.select_dtypes(include="number").columns.tolist()
+cat_cols = [c for c in X.columns if c not in num_cols]
+
+
+def make_preprocessor(scale):
+    num_steps = [("imputer", SimpleImputer(strategy="median"))]
+    if scale:
+        num_steps.append(("scaler", StandardScaler()))
+    return ColumnTransformer([
+        ("num", Pipeline(num_steps), num_cols),
+        ("cat", Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ]), cat_cols),
+    ])
+
+
+# -----------------------------
+# 5. 모델 정의 (베이스라인 + 비교 모델)
+# -----------------------------
+positive = sorted(y.unique())[-1]  # 보통 1 = stroke 있음
+
+models = {
+    "베이스라인① 항상 다수 클래스": Pipeline([
+        ("prep", make_preprocessor(False)),
+        ("model", DummyClassifier(strategy="most_frequent")),
+    ]),
+    "베이스라인② 비율대로 무작위": Pipeline([
+        ("prep", make_preprocessor(False)),
+        ("model", DummyClassifier(strategy="stratified", random_state=int(seed))),
+    ]),
+    "로지스틱 회귀": Pipeline([
+        ("prep", make_preprocessor(True)),
+        ("model", LogisticRegression(max_iter=1000, class_weight="balanced")),
+    ]),
+    "랜덤 포레스트": Pipeline([
+        ("prep", make_preprocessor(False)),
+        ("model", RandomForestClassifier(n_estimators=200, class_weight="balanced",
+                                         random_state=int(seed))),
+    ]),
+}
+
+# -----------------------------
+# 6. 학습 및 평가
+# -----------------------------
+rows, cms = [], {}
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+    rows.append({
+        "모델": name,
+        "정확도(Accuracy)": accuracy_score(y_test, pred),
+        "재현율(Recall)": recall_score(y_test, pred, pos_label=positive, zero_division=0),
+    })
+    cms[name] = confusion_matrix(y_test, pred, labels=sorted(y.unique()))
+
+result = pd.DataFrame(rows)
+
+st.header("📊 정확도와 재현율 비교")
+st.dataframe(
+    result.style.format({"정확도(Accuracy)": "{:.3f}", "재현율(Recall)": "{:.3f}"}),
+    hide_index=True, use_container_width=True,
+)
+
+long = result.melt(id_vars="모델", var_name="지표", value_name="점수")
+fig = px.bar(long, x="모델", y="점수", color="지표", barmode="group",
+             text=long["점수"].round(3), title="모델별 정확도·재현율")
+fig.update_layout(yaxis_range=[0, 1.05])
+st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------
+# 7. 발견 문장
+# -----------------------------
+base = result.iloc[0]
+best = result.iloc[2:].sort_values("재현율(Recall)", ascending=False).iloc[0]
+st.info(
+    f"🔎 **발견:** '항상 다수 클래스' 베이스라인의 정확도는 **{base['정확도(Accuracy)']:.3f}**, "
+    f"재현율은 **{base['재현율(Recall)']:.3f}** 입니다.  \n"
+    f"📎 **근거:** 재현율이 가장 높은 비교 모델은 **{best['모델']}**"
+    f"(정확도 {best['정확도(Accuracy)']:.3f}, 재현율 {best['재현율(Recall)']:.3f})입니다."
+)
+
+# -----------------------------
+# 8. 혼동행렬
+# -----------------------------
+st.header("🧮 혼동행렬 (행: 실제, 열: 예측)")
+labels = [str(v) for v in sorted(y.unique())]
+cols = st.columns(len(cms))
+for col, (name, cm) in zip(cols, cms.items()):
+    with col:
+        st.markdown(f"**{name}**")
+        st.dataframe(
+            pd.DataFrame(cm, index=[f"실제 {l}" for l in labels],
+                         columns=[f"예측 {l}" for l in labels]),
+            use_container_width=True,
+        )
+
+st.warning(
+    "정확도가 높아도 재현율이 0이면 stroke 환자를 하나도 찾지 못한 모델입니다. "
+    "또한 이 결과는 한 번의 분할 결과이므로, random_state를 바꾸거나 교차검증으로 확인해야 합니다."
+)
+
+st.header("💡 더 탐구해 볼 질문")
+st.markdown("""
+- 베이스라인①의 정확도는 stroke 비율과 어떤 관계가 있을까?
+- 정확도는 베이스라인보다 낮은데 재현율은 높은 모델은 좋은 모델일까?
+- `class_weight`를 빼면 두 모델의 재현율은 어떻게 달라질까?
+- 재현율을 높이면 정밀도(Precision)는 어떻게 될까?
+""")
