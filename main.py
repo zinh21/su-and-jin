@@ -53,7 +53,6 @@ def load_data():
     if not year_cols_z or not year_cols_t:
         return None, None, f"연도 열을 찾지 못했습니다. 열 이름: {list(zone.columns)} / {list(traffic.columns)}"
 
-    # 처리 기록 (원본 상태)
     log = [
         {"자료": "어린이보호구역", "원본 행": len(zone), "원본 열": zone.shape[1],
          "원본 빈 값": int(zone.isna().sum().sum())},
@@ -61,7 +60,6 @@ def load_data():
          "원본 빈 값": int(traffic.isna().sum().sum())},
     ]
 
-    # 보호구역: 연도 열이 모두 숫자인 첫 행
     zrow = None
     for _, r in zone.iterrows():
         if to_num(r[year_cols_z]).notna().all():
@@ -72,7 +70,6 @@ def load_data():
     zones = to_num(zrow[year_cols_z]).values
     log[0]["사용한 행"] = 1
 
-    # 교통사고: 전국 합계 행만 사용
     t = traffic.copy()
     for c in ["시도", "시군구", "연도"]:
         if c in t.columns:
@@ -102,16 +99,13 @@ def load_data():
     })
     df = zdf.merge(tdf, on="연도").sort_values("연도").reset_index(drop=True)
 
-    # 결측치 처리: 분석에 쓰는 열에 빈 값이 있는 연도 행 삭제
     use_cols = ["지정 수", "사고 건수"]
     before = len(df)
     df = df.dropna(subset=use_cols).reset_index(drop=True)
-    log[0]["연도 행(처리 전)"] = before
-    log[0]["삭제한 연도 행"] = before - len(df)
-    log[0]["연도 행(처리 후)"] = len(df)
-    log[1]["연도 행(처리 전)"] = before
-    log[1]["삭제한 연도 행"] = before - len(df)
-    log[1]["연도 행(처리 후)"] = len(df)
+    for i in (0, 1):
+        log[i]["연도 행(처리 전)"] = before
+        log[i]["삭제한 연도 행"] = before - len(df)
+        log[i]["연도 행(처리 후)"] = len(df)
 
     return df, pd.DataFrame(log), None
 
@@ -141,7 +135,7 @@ def page_analysis(df, log):
     st.dataframe(log, hide_index=True, use_container_width=True)
     st.caption(
         "결측치: 분석에 쓰는 열(지정 수, 사고 건수)에 빈 값이 있는 연도 행은 삭제합니다. "
-        "전국 합계 행만 사용해서 삭제된 행 수가 0이면 빈 값이 없었다는 뜻입니다. "
+        "삭제한 연도 행이 0이면 빈 값이 없었다는 뜻입니다. "
         "이상치: 연도가 16개뿐이라 IQR 같은 방법이 의미가 없어 처리하지 않았습니다."
     )
 
@@ -203,7 +197,7 @@ def page_regression(df):
     use_year = st.sidebar.checkbox("연도도 특성에 포함", value=False)
     split_year = st.sidebar.slider(
         "테스트 시작 연도 (이 연도 전 = 학습, 이 연도 이후 = 테스트)",
-        min_y + 3, max_y - 1, min(2021, max_y - 1),
+        min_y + 8, max_y - 1, min(2021, max_y - 1),
     )
     max_depth = st.sidebar.slider("트리 max_depth", 1, 6, 2)
     n_trees = st.sidebar.slider("랜덤 포레스트 나무 수", 20, 300, 100, 20)
@@ -247,14 +241,21 @@ def page_regression(df):
                  hide_index=True, use_container_width=True)
     st.caption("MAE·RMSE는 작을수록, R²는 1에 가까울수록 좋습니다. R²가 0보다 작으면 평균 예측보다 못합니다.")
 
-    st.header("📈 테스트 기간 예측 vs 실제")
-    plot = pd.DataFrame({"연도": test["연도"].values, "실제": y_test.values})
+    st.header("📈 전체 기간 실제값과 테스트 기간 예측")
+    full = pd.DataFrame({"연도": df["연도"], "실제": df[target]})
+    pred_df = pd.DataFrame({"연도": test["연도"].values})
     for name, p in preds.items():
-        plot[name] = p
-    fig = px.line(plot.melt(id_vars="연도", var_name="구분", value_name=target),
-                  x="연도", y=target, color="구분", markers=True)
-    fig.update_layout(xaxis=dict(type="category"))
+        pred_df[name] = p
+    merged_plot = full.merge(pred_df, on="연도", how="left")
+    long = merged_plot.melt(id_vars="연도", var_name="구분", value_name=target)
+    fig = px.line(long.dropna(), x="연도", y=target, color="구분", markers=True)
+    fig.add_vrect(x0=min_y - 0.5, x1=split_year - 0.5, fillcolor="gray", opacity=0.15,
+                  annotation_text=f"학습 구간 ({min_y}~{split_year - 1})",
+                  annotation_position="top left")
+    fig.update_layout(xaxis=dict(type="linear", dtick=1))
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"회색 영역이 학습 구간이에요. 학습은 항상 {min_y}년부터 시작하고, "
+               f"예측선은 테스트 구간({split_year}~{max_y})에만 나타나요.")
 
     real = result[result["모델"] != "베이스라인(평균)"]
     best = real.loc[real["MAE"].idxmin()]
