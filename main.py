@@ -23,7 +23,8 @@ def read_csv_file(pattern):
     files = glob.glob(pattern)
     if not files:
         return None
-    raw = open(files[0], "rb").read()
+    with open(files[0], "rb") as f:
+        raw = f.read()
     for enc in ["utf-8-sig", "cp949", "euc-kr"]:
         try:
             return pd.read_csv(StringIO(raw.decode(enc)), dtype=str)
@@ -42,7 +43,7 @@ def load_data():
     zone = read_csv_file("161601*.csv")
     traffic = read_csv_file("교통사고통계*.csv")
     if zone is None or traffic is None:
-        return None, "CSV 파일을 찾지 못했습니다. 저장소에 두 CSV가 main.py와 같은 폴더에 있는지 확인하세요."
+        return None, None, "CSV 파일을 찾지 못했습니다. 두 CSV가 main.py와 같은 폴더에 있는지 확인하세요."
 
     zone.columns = [str(c).strip() for c in zone.columns]
     traffic.columns = [str(c).strip() for c in traffic.columns]
@@ -50,19 +51,28 @@ def load_data():
     year_cols_z = [c for c in zone.columns if re.fullmatch(r"(19|20)\d{2}", c)]
     year_cols_t = [c for c in traffic.columns if re.fullmatch(r"(19|20)\d{2}", c)]
     if not year_cols_z or not year_cols_t:
-        return None, f"연도 열을 찾지 못했습니다. 열 이름: {list(zone.columns)} / {list(traffic.columns)}"
+        return None, None, f"연도 열을 찾지 못했습니다. 열 이름: {list(zone.columns)} / {list(traffic.columns)}"
 
-    # 보호구역: 숫자가 들어 있는 첫 행
+    # 처리 기록 (원본 상태)
+    log = [
+        {"자료": "어린이보호구역", "원본 행": len(zone), "원본 열": zone.shape[1],
+         "원본 빈 값": int(zone.isna().sum().sum())},
+        {"자료": "교통사고", "원본 행": len(traffic), "원본 열": traffic.shape[1],
+         "원본 빈 값": int(traffic.isna().sum().sum())},
+    ]
+
+    # 보호구역: 연도 열이 모두 숫자인 첫 행
     zrow = None
     for _, r in zone.iterrows():
         if to_num(r[year_cols_z]).notna().all():
             zrow = r
             break
     if zrow is None:
-        return None, "보호구역 CSV에서 숫자 행을 찾지 못했습니다."
+        return None, None, "보호구역 CSV에서 숫자 행을 찾지 못했습니다."
     zones = to_num(zrow[year_cols_z]).values
+    log[0]["사용한 행"] = 1
 
-    # 교통사고: 연도 열의 항목 값으로 행 찾기 (합계 행 우선)
+    # 교통사고: 전국 합계 행만 사용
     t = traffic.copy()
     for c in ["시도", "시군구", "연도"]:
         if c in t.columns:
@@ -80,16 +90,30 @@ def load_data():
 
     acc, death, injury = find_row("사고"), find_row("사망"), find_row("부상")
     if acc is None:
-        return None, "교통사고 CSV의 '연도' 열에서 '사고' 행을 찾지 못했습니다."
+        return None, None, "교통사고 CSV의 '연도' 열에서 '사고' 행을 찾지 못했습니다."
+    log[1]["사용한 행"] = sum(x is not None for x in [acc, death, injury])
 
-    years_z = [int(c) for c in year_cols_z]
-    years_t = [int(c) for c in year_cols_t]
-    zdf = pd.DataFrame({"연도": years_z, "지정 수": zones})
-    tdf = pd.DataFrame({"연도": years_t, "사고 건수": acc,
-                        "사망자": death if death is not None else np.nan,
-                        "부상자": injury if injury is not None else np.nan})
+    zdf = pd.DataFrame({"연도": [int(c) for c in year_cols_z], "지정 수": zones})
+    tdf = pd.DataFrame({
+        "연도": [int(c) for c in year_cols_t],
+        "사고 건수": acc,
+        "사망자": death if death is not None else np.nan,
+        "부상자": injury if injury is not None else np.nan,
+    })
     df = zdf.merge(tdf, on="연도").sort_values("연도").reset_index(drop=True)
-    return df, None
+
+    # 결측치 처리: 분석에 쓰는 열에 빈 값이 있는 연도 행 삭제
+    use_cols = ["지정 수", "사고 건수"]
+    before = len(df)
+    df = df.dropna(subset=use_cols).reset_index(drop=True)
+    log[0]["연도 행(처리 전)"] = before
+    log[0]["삭제한 연도 행"] = before - len(df)
+    log[0]["연도 행(처리 후)"] = len(df)
+    log[1]["연도 행(처리 전)"] = before
+    log[1]["삭제한 연도 행"] = before - len(df)
+    log[1]["연도 행(처리 후)"] = len(df)
+
+    return df, pd.DataFrame(log), None
 
 
 def pct(a, b):
@@ -99,21 +123,27 @@ def pct(a, b):
 # =============================================================
 # 페이지 1: 교통안전 분석
 # =============================================================
-def page_analysis(df):
+def page_analysis(df, log):
     st.title("🚸 어린이보호구역 교통안전 분석")
     st.markdown("어린이보호구역 지정 수와 교통사고 변화를 살펴봅니다.")
 
     st.header("🗂️ 데이터 개요")
     c1, c2, c3 = st.columns(3)
-    c1.metric("행 개수", f"{len(df):,}")
+    c1.metric("정리된 표 행 개수", f"{len(df):,}")
     c2.metric("열 개수", f"{df.shape[1]:,}")
     c3.metric("빈 값 총합", f"{int(df.isna().sum().sum()):,}")
     ov = pd.DataFrame({"열 이름": df.columns, "자료형": df.dtypes.astype(str).values,
                        "빈 값 개수": df.isna().sum().values})
     st.dataframe(ov, hide_index=True, use_container_width=True)
     st.dataframe(df, hide_index=True, use_container_width=True)
-    st.caption("결측치: 이 자료는 전국 합계 행만 사용해 빈 값이 없고, 별도 삭제는 하지 않았습니다. "
-               "이상치는 처리하지 않았습니다.")
+
+    st.header("🧹 결측치·이상치 처리 결과")
+    st.dataframe(log, hide_index=True, use_container_width=True)
+    st.caption(
+        "결측치: 분석에 쓰는 열(지정 수, 사고 건수)에 빈 값이 있는 연도 행은 삭제합니다. "
+        "전국 합계 행만 사용해서 삭제된 행 수가 0이면 빈 값이 없었다는 뜻입니다. "
+        "이상치: 연도가 16개뿐이라 IQR 같은 방법이 의미가 없어 처리하지 않았습니다."
+    )
 
     st.header("📊 그래프와 발견한 점")
     units = {"지정 수": "개", "사고 건수": "건", "사망자": "명", "부상자": "명"}
@@ -165,11 +195,16 @@ def page_analysis(df):
 def page_regression(df):
     st.title("📐 지정 수로 사고 건수 예측 (회귀 모델 비교)")
 
+    min_y, max_y = int(df["연도"].min()), int(df["연도"].max())
+
     st.sidebar.header("⚙️ 회귀 설정")
     targets = [c for c in ["사고 건수", "사망자", "부상자"] if df[c].notna().any()]
     target = st.sidebar.selectbox("예측할 값(y)", targets)
     use_year = st.sidebar.checkbox("연도도 특성에 포함", value=False)
-    split_year = st.sidebar.slider("이 연도부터 테스트", 2015, 2023, 2021)
+    split_year = st.sidebar.slider(
+        "테스트 시작 연도 (이 연도 전 = 학습, 이 연도 이후 = 테스트)",
+        min_y + 3, max_y - 1, min(2021, max_y - 1),
+    )
     max_depth = st.sidebar.slider("트리 max_depth", 1, 6, 2)
     n_trees = st.sidebar.slider("랜덤 포레스트 나무 수", 20, 300, 100, 20)
 
@@ -250,7 +285,7 @@ def page_regression(df):
 # =============================================================
 # 메인
 # =============================================================
-data, err = load_data()
+data, log_df, err = load_data()
 if err:
     st.error(err)
     st.stop()
@@ -259,6 +294,6 @@ page = st.sidebar.radio("📂 페이지 선택", ["🚸 교통안전 분석", "�
 st.sidebar.divider()
 
 if page.startswith("🚸"):
-    page_analysis(data)
+    page_analysis(data, log_df)
 else:
     page_regression(data)
