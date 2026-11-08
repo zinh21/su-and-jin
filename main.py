@@ -362,7 +362,6 @@ def page_classification(df):
     st.caption("자료가 연도별 16행뿐이라 시험 데이터를 따로 떼지 않고, 한 해씩 빼고 나머지로 학습해 "
                "그 해를 예측하는 방식(LOOCV)으로 16개 전체의 예측을 모았습니다.")
 
-    # ---- 모델 (가중치 켬) ----
     models = {
         "로지스틱 회귀": make_pipeline(StandardScaler(),
                                   LogisticRegression(class_weight="balanced", max_iter=1000)),
@@ -379,7 +378,6 @@ def page_classification(df):
     proba_off = cross_val_predict(logit_off, X, y, cv=loo, method="predict_proba")[:, 1]
     base_pred = cross_val_predict(DummyClassifier(strategy="most_frequent"), X, y, cv=loo)
 
-    # ---- 1. 혼동행렬 ----
     st.header("1️⃣ 가중치를 켠 로지스틱 회귀의 혼동행렬")
     pred_lr = (probas["로지스틱 회귀"] >= 0.5).astype(int)
     tn, fp, fn, tp = cm_counts(y, pred_lr)
@@ -395,7 +393,6 @@ def page_classification(df):
 - **TN {tn}**: 적은 해를 '적음'으로 맞힘
 """)
 
-    # ---- 2. 정밀도·재현율·F1 직접 계산 ----
     st.header("2️⃣ 정밀도·재현율·F1이란? (숫자로 직접 계산)")
     precision = safe_div(tp, tp + fp)
     recall = safe_div(tp, tp + fn)
@@ -412,7 +409,6 @@ def page_classification(df):
 """)
     st.caption("분모가 0이면 0으로 처리했어요. 이 값들이 아래 표의 로지스틱 회귀 값과 같은지 확인해 보세요.")
 
-    # ---- 3. 정확도 비교 ----
     st.header("3️⃣ 정확도 비교: 가중치 켬 vs 끔 vs 베이스라인")
     pred_off = (proba_off >= 0.5).astype(int)
     acc_df = pd.DataFrame({
@@ -428,7 +424,6 @@ def page_classification(df):
     st.caption("베이스라인은 '많음'이 소수일 때 모두 '적음'이라고만 해도 정확도가 높게 나옵니다. "
                "그래서 정확도만 보면 안 되고 재현율을 함께 봐야 합니다.")
 
-    # ---- 4. 네 모델 비교 + 최종 모델 ----
     st.header("4️⃣ 세 모델 + 베이스라인 비교 (가중치 켬)")
     rows = [{"모델": "베이스라인", **cls_metrics(y, base_pred)}]
     for n, p in probas.items():
@@ -460,7 +455,6 @@ def page_classification(df):
 4. 표본이 16개라 점수 차이가 1~2개 연도 때문일 수 있음을 함께 적기
 """)
 
-    # ---- 5. 판정 기준 슬라이더 ----
     st.header("5️⃣ 판정 기준을 바꾸면?")
     model_name = st.selectbox("모델 선택", list(models.keys()))
     thr = st.slider("판정 기준 (확률이 이 값 이상이면 '많음')", 0.05, 0.95, 0.5, 0.05)
@@ -498,57 +492,6 @@ def page_classification(df):
 
 
 # =============================================================
-# 페이지 4: 검증 기록 (log)
-# =============================================================
-def page_log(df):
-    st.title("📓 검증 기록 남기기")
-    st.markdown("AI의 제안을 **시험용 데이터로 확인**해 고치거나 버린 과정을 log에 남깁니다. "
-                "아래 표는 앱이 계산한 실제 값이니 근거로 쓰세요.")
-
-    min_y, max_y = int(df["연도"].min()), int(df["연도"].max())
-    c1, c2, c3 = st.columns(3)
-    target = c1.selectbox("예측할 값(y)", [c for c in ["사고 건수", "사망자", "부상자"]
-                                          if df[c].notna().any()])
-    split_year = c2.slider("테스트 시작 연도", min_y + 8, max_y - 1, min(2021, max_y - 1))
-    max_depth = c3.slider("트리 max_depth", 1, 6, 2)
-
-    result, _, _, train, test = evaluate(df, target, ["지정 수"], split_year, max_depth, 100)
-    st.caption(f"학습 {train['연도'].min()}~{train['연도'].max()} ({len(train)}개) / "
-               f"시험 {test['연도'].min()}~{test['연도'].max()} ({len(test)}개)")
-
-    st.subheader("근거: 학습용 vs 시험용 지표")
-    cols = [c for c in result.columns if c != "모델"]
-    st.dataframe(result.style.format({c: "{:.3f}" for c in cols}),
-                 hide_index=True, use_container_width=True)
-
-    st.subheader("기록 입력")
-    name = st.text_input("학번 이름", "")
-    decision = st.text_area(
-        "오늘 결정한 것",
-        "모델은 학습용이 아니라 시험용 데이터의 MAE·RMSE·R²로 비교하기로 함.")
-    prompt = st.text_area(
-        "AI에게 보낸 프롬프트(원문)",
-        "학습 R²가 1에 가까운 게 이상해. 결정트리는 깊게 만들면 학습 데이터를 외운다고 했잖아. "
-        "이 값은 어떤 데이터로 계산한 거야? 시험용 데이터로 MAE, RMSE, R²를 다시 계산해 줘.")
-    discard = st.text_area(
-        "AI가 준 것 중 고치거나 버린 것과 그 이유",
-        "위 표의 실제 숫자로 바꿔 쓰세요.")
-    feeling = st.text_area(
-        "느낀 점",
-        "학습용 점수가 너무 좋다는 것이 오히려 의심해야 할 신호라는 걸 알게 됨.")
-
-    log_md = f"""## {name if name else '학번 이름'}
-- 오늘 결정한 것: {decision}
-- AI에게 보낸 프롬프트(원문): {prompt}
-- AI가 준 것 중 고치거나 버린 것과 그 이유: {discard}
-- 느낀 점: {feeling}
-"""
-    st.subheader("log에 붙여넣을 기록")
-    st.code(log_md, language="markdown")
-    st.download_button("기록을 .md로 저장", log_md, file_name="verification_log.md")
-
-
-# =============================================================
 # 메인
 # =============================================================
 data, log_df, err = load_data()
@@ -557,15 +500,12 @@ if err:
     st.stop()
 
 page = st.sidebar.radio("📂 페이지 선택",
-                        ["🚸 교통안전 분석", "📐 회귀 모델 비교",
-                         "🎯 분류 모델 비교", "📓 검증 기록"])
+                        ["🚸 교통안전 분석", "📐 회귀 모델 비교", "🎯 분류 모델 비교"])
 st.sidebar.divider()
 
 if page.startswith("🚸"):
     page_analysis(data, log_df)
 elif page.startswith("📐"):
     page_regression(data)
-elif page.startswith("🎯"):
-    page_classification(data)
 else:
-    page_log(data)
+    page_classification(data)
