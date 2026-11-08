@@ -115,6 +115,52 @@ def pct(a, b):
 
 
 # =============================================================
+# 회귀 평가 (학습용 vs 시험용)
+# =============================================================
+def evaluate(df, target, features, split_year, max_depth, n_trees):
+    train, test = df[df["연도"] < split_year], df[df["연도"] >= split_year]
+    X_train, y_train = train[features], train[target]
+    X_test, y_test = test[features], test[target]
+
+    models = {
+        "베이스라인(평균)": DummyRegressor(strategy="mean"),
+        "선형 회귀": LinearRegression(),
+        "결정트리": DecisionTreeRegressor(max_depth=max_depth, random_state=42),
+        "랜덤 포레스트": RandomForestRegressor(n_estimators=n_trees, max_depth=max_depth,
+                                            random_state=42),
+    }
+    X_all, y_all = df[features], df[target]
+    rows, preds = [], {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        p_test = model.predict(X_test)
+        p_train = model.predict(X_train)
+        preds[name] = p_test
+        loo = cross_val_predict(model, X_all, y_all, cv=LeaveOneOut())
+        rows.append({
+            "모델": name,
+            "학습 MAE": mean_absolute_error(y_train, p_train),
+            "시험 MAE": mean_absolute_error(y_test, p_test),
+            "시험 RMSE": np.sqrt(mean_squared_error(y_test, p_test)),
+            "학습 R²": r2_score(y_train, p_train),
+            "시험 R²": r2_score(y_test, p_test) if len(y_test) > 1 else np.nan,
+            "LOOCV MAE": mean_absolute_error(y_all, loo),
+            "LOOCV R²": r2_score(y_all, loo),
+        })
+    result = pd.DataFrame(rows)
+    return result, preds, models, train, test
+
+
+def to_markdown_table(result):
+    cols = [c for c in result.columns if c != "모델"]
+    head = "| " + " | ".join(result.columns) + " |"
+    div = "|" + "|".join(["---"] * len(result.columns)) + "|"
+    body = ["| " + " | ".join([r["모델"]] + [f"{r[c]:.3f}" for c in cols]) + " |"
+            for _, r in result.iterrows()]
+    return "\n".join([head, div] + body)
+
+
+# =============================================================
 # 페이지 1: 교통안전 분석
 # =============================================================
 def page_analysis(df, log):
@@ -203,43 +249,17 @@ def page_regression(df):
     n_trees = st.sidebar.slider("랜덤 포레스트 나무 수", 20, 300, 100, 20)
 
     features = ["지정 수"] + (["연도"] if use_year else [])
-    train, test = df[df["연도"] < split_year], df[df["연도"] >= split_year]
-    X_train, y_train = train[features], train[target]
-    X_test, y_test = test[features], test[target]
+    result, preds, models, train, test = evaluate(df, target, features, split_year,
+                                                  max_depth, n_trees)
     st.caption(f"학습 {len(train)}개({train['연도'].min()}~{train['연도'].max()}) / "
                f"테스트 {len(test)}개({test['연도'].min()}~{test['연도'].max()}) - 시간 순서 분할")
 
-    models = {
-        "베이스라인(평균)": DummyRegressor(strategy="mean"),
-        "선형 회귀": LinearRegression(),
-        "결정트리": DecisionTreeRegressor(max_depth=max_depth, random_state=42),
-        "랜덤 포레스트": RandomForestRegressor(n_estimators=n_trees, max_depth=max_depth,
-                                            random_state=42),
-    }
-
-    rows, preds = [], {}
-    X_all, y_all = df[features], df[target]
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        p = model.predict(X_test)
-        preds[name] = p
-        loo = cross_val_predict(model, X_all, y_all, cv=LeaveOneOut())
-        rows.append({
-            "모델": name,
-            "MAE": mean_absolute_error(y_test, p),
-            "RMSE": np.sqrt(mean_squared_error(y_test, p)),
-            "R²": r2_score(y_test, p) if len(y_test) > 1 else np.nan,
-            "LOOCV MAE": mean_absolute_error(y_all, loo),
-            "LOOCV R²": r2_score(y_all, loo),
-        })
-
-    result = pd.DataFrame(rows)
     cols = [c for c in result.columns if c != "모델"]
-
-    st.header("📋 성능 비교표")
+    st.header("📋 성능 비교표 (학습용 vs 시험용)")
     st.dataframe(result.style.format({c: "{:.3f}" for c in cols}),
                  hide_index=True, use_container_width=True)
-    st.caption("MAE·RMSE는 작을수록, R²는 1에 가까울수록 좋습니다. R²가 0보다 작으면 평균 예측보다 못합니다.")
+    st.caption("학습 지표만 좋고 시험 지표가 나쁘면 학습 데이터를 외운 과적합 신호입니다. "
+               "모델 비교는 시험 MAE·RMSE·R²와 LOOCV로 하세요. R²가 0보다 작으면 평균 예측보다 못합니다.")
 
     st.header("📈 전체 기간 실제값과 테스트 기간 예측")
     full = pd.DataFrame({"연도": df["연도"], "실제": df[target]})
@@ -258,11 +278,11 @@ def page_regression(df):
                f"예측선은 테스트 구간({split_year}~{max_y})에만 나타나요.")
 
     real = result[result["모델"] != "베이스라인(평균)"]
-    best = real.loc[real["MAE"].idxmin()]
+    best = real.loc[real["시험 MAE"].idxmin()]
     base = result[result["모델"] == "베이스라인(평균)"].iloc[0]
-    st.info(f"🔎 **발견:** 테스트 MAE가 가장 낮은 모델은 **{best['모델']}**입니다.  \n"
-            f"📎 **근거:** MAE {best['MAE']:.2f} (베이스라인 {base['MAE']:.2f}), "
-            f"R² {best['R²']:.3f}, LOOCV R² {best['LOOCV R²']:.3f}")
+    st.info(f"🔎 **발견:** 시험 MAE가 가장 낮은 모델은 **{best['모델']}**입니다.  \n"
+            f"📎 **근거:** 시험 MAE {best['시험 MAE']:.2f} (베이스라인 {base['시험 MAE']:.2f}), "
+            f"시험 R² {best['시험 R²']:.3f}, LOOCV R² {best['LOOCV R²']:.3f}")
 
     st.header("🔍 선형 회귀 해석")
     lin = models["선형 회귀"]
@@ -271,16 +291,71 @@ def page_regression(df):
     st.write(f"절편: {lin.intercept_:.2f}")
 
     st.header("📝 README에 붙여넣을 표")
-    head = "| " + " | ".join(result.columns) + " |"
-    div = "|" + "|".join(["---"] * len(result.columns)) + "|"
-    body = ["| " + " | ".join([r["모델"]] + [f"{r[c]:.3f}" for c in cols]) + " |"
-            for _, r in result.iterrows()]
-    md = "\n".join([head, div] + body)
+    md = to_markdown_table(result)
     st.code(md, language="markdown")
     st.download_button("표를 .md로 저장", md, file_name="regression_comparison.md")
 
     st.warning("표본이 16개뿐이고 지정 수와 사고 건수는 둘 다 시간에 따라 변해 상관이 있어도 "
                "원인이라 할 수 없습니다. 트리 계열은 학습 범위 밖 값을 예측하지 못합니다.")
+
+
+# =============================================================
+# 페이지 3: 검증 기록 (log)
+# =============================================================
+def page_log(df):
+    st.title("📓 검증 기록 남기기")
+    st.markdown("AI의 제안을 **시험용 데이터로 확인**해 고치거나 버린 과정을 log에 남깁니다. "
+                "아래 표는 앱이 계산한 실제 값이니 근거로 쓰세요.")
+
+    min_y, max_y = int(df["연도"].min()), int(df["연도"].max())
+    c1, c2, c3 = st.columns(3)
+    target = c1.selectbox("예측할 값(y)", [c for c in ["사고 건수", "사망자", "부상자"]
+                                          if df[c].notna().any()])
+    split_year = c2.slider("테스트 시작 연도", min_y + 8, max_y - 1, min(2021, max_y - 1))
+    max_depth = c3.slider("트리 max_depth", 1, 6, 2)
+
+    result, _, _, train, test = evaluate(df, target, ["지정 수"], split_year, max_depth, 100)
+    st.caption(f"학습 {train['연도'].min()}~{train['연도'].max()} ({len(train)}개) / "
+               f"시험 {test['연도'].min()}~{test['연도'].max()} ({len(test)}개)")
+
+    st.subheader("근거: 학습용 vs 시험용 지표")
+    cols = [c for c in result.columns if c != "모델"]
+    st.dataframe(result.style.format({c: "{:.3f}" for c in cols}),
+                 hide_index=True, use_container_width=True)
+    st.caption("분류의 '정확도 1.0'처럼, 회귀에서는 학습 R²가 1에 가깝고 시험 R²가 낮으면 의심하세요.")
+
+    st.subheader("기록 입력")
+    name = st.text_input("학번 이름", "")
+    decision = st.text_area(
+        "오늘 결정한 것",
+        "모델은 학습용이 아니라 시험용 데이터의 MAE·RMSE·R²로 비교하기로 함.")
+    prompt = st.text_area(
+        "AI에게 보낸 프롬프트(원문)",
+        "학습 R²가 1에 가까운 게 이상해. 결정트리는 깊게 만들면 학습 데이터를 외운다고 했잖아. "
+        "이 값은 어떤 데이터로 계산한 거야? 시험용 데이터로 MAE, RMSE, R²를 다시 계산해 줘.")
+    discard = st.text_area(
+        "AI가 준 것 중 고치거나 버린 것과 그 이유",
+        "AI는 ○○ 모델이 가장 좋다고 했지만 학습용으로 계산한 값이었고, "
+        "시험용으로 다시 계산하니 시험 R²가 ○○로 낮아 그 결론을 버림. (위 표의 실제 숫자로 바꾸세요)")
+    feeling = st.text_area(
+        "느낀 점",
+        "학습용 점수가 너무 좋다는 것이 오히려 의심해야 할 신호라는 걸 알게 됨.")
+
+    log_md = f"""## {name if name else '학번 이름'}
+- 오늘 결정한 것: {decision}
+- AI에게 보낸 프롬프트(원문): {prompt}
+- AI가 준 것 중 고치거나 버린 것과 그 이유: {discard}
+- 느낀 점: {feeling}
+
+**근거 표** (테스트 시작 연도 {split_year}, 예측값 {target})
+
+{to_markdown_table(result)}
+"""
+    st.subheader("log에 붙여넣을 기록")
+    st.code(log_md, language="markdown")
+    st.download_button("기록을 .md로 저장", log_md, file_name="verification_log.md")
+    st.warning("프롬프트는 실제로 보낸 원문을 쓰고, 숫자는 위 표에서 가져오세요. "
+               "다른 사람의 결과(예: 재현율 0~0.16)를 그대로 옮기면 안 됩니다.")
 
 
 # =============================================================
@@ -291,10 +366,13 @@ if err:
     st.error(err)
     st.stop()
 
-page = st.sidebar.radio("📂 페이지 선택", ["🚸 교통안전 분석", "📐 회귀 모델 비교"])
+page = st.sidebar.radio("📂 페이지 선택",
+                        ["🚸 교통안전 분석", "📐 회귀 모델 비교", "📓 검증 기록"])
 st.sidebar.divider()
 
 if page.startswith("🚸"):
     page_analysis(data, log_df)
-else:
+elif page.startswith("📐"):
     page_regression(data)
+else:
+    page_log(data)
