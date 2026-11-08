@@ -6,12 +6,16 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sklearn.dummy import DummyRegressor
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.dummy import DummyClassifier, DummyRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (accuracy_score, confusion_matrix, f1_score,
+                             mean_absolute_error, mean_squared_error,
+                             precision_score, r2_score, recall_score)
 from sklearn.model_selection import LeaveOneOut, cross_val_predict
-from sklearn.tree import DecisionTreeRegressor
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 st.set_page_config(page_title="어린이보호구역 교통안전", page_icon="🚸", layout="wide")
 
@@ -115,6 +119,83 @@ def pct(a, b):
 
 
 # =============================================================
+# 회귀 평가 (학습용 vs 시험용)
+# =============================================================
+def evaluate(df, target, features, split_year, max_depth, n_trees):
+    train, test = df[df["연도"] < split_year], df[df["연도"] >= split_year]
+    X_train, y_train = train[features], train[target]
+    X_test, y_test = test[features], test[target]
+
+    models = {
+        "베이스라인(평균)": DummyRegressor(strategy="mean"),
+        "선형 회귀": LinearRegression(),
+        "결정트리": DecisionTreeRegressor(max_depth=max_depth, random_state=42),
+        "랜덤 포레스트": RandomForestRegressor(n_estimators=n_trees, max_depth=max_depth,
+                                            random_state=42),
+    }
+    X_all, y_all = df[features], df[target]
+    rows, preds = [], {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        p_test = model.predict(X_test)
+        p_train = model.predict(X_train)
+        preds[name] = p_test
+        loo = cross_val_predict(model, X_all, y_all, cv=LeaveOneOut())
+        rows.append({
+            "모델": name,
+            "학습 MAE": mean_absolute_error(y_train, p_train),
+            "시험 MAE": mean_absolute_error(y_test, p_test),
+            "시험 RMSE": np.sqrt(mean_squared_error(y_test, p_test)),
+            "학습 R²": r2_score(y_train, p_train),
+            "시험 R²": r2_score(y_test, p_test) if len(y_test) > 1 else np.nan,
+            "LOOCV MAE": mean_absolute_error(y_all, loo),
+            "LOOCV R²": r2_score(y_all, loo),
+        })
+    result = pd.DataFrame(rows)
+    return result, preds, models, train, test
+
+
+def to_markdown_table(result):
+    cols = [c for c in result.columns if c != "모델"]
+    head = "| " + " | ".join(result.columns) + " |"
+    div = "|" + "|".join(["---"] * len(result.columns)) + "|"
+    body = ["| " + " | ".join([r["모델"]] + [f"{r[c]:.3f}" for c in cols]) + " |"
+            for _, r in result.iterrows()]
+    return "\n".join([head, div] + body)
+
+
+# =============================================================
+# 분류 도우미
+# =============================================================
+def safe_div(a, b):
+    return a / b if b else 0.0
+
+
+def cm_counts(y_true, pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+    return int(tn), int(fp), int(fn), int(tp)
+
+
+def cls_metrics(y_true, pred):
+    return {
+        "정확도": accuracy_score(y_true, pred),
+        "정밀도": precision_score(y_true, pred, zero_division=0),
+        "재현율": recall_score(y_true, pred, zero_division=0),
+        "F1": f1_score(y_true, pred, zero_division=0),
+    }
+
+
+def cm_figure(tn, fp, fn, tp, title):
+    cm = np.array([[tn, fp], [fn, tp]])
+    fig = px.imshow(cm, text_auto=True, color_continuous_scale="Blues",
+                    x=["예측: 적음(0)", "예측: 많음(1)"],
+                    y=["실제: 적음(0)", "실제: 많음(1)"], title=title)
+    fig.update_layout(coloraxis_showscale=False)
+    fig.update_traces(textfont_size=28)
+    return fig
+
+
+# =============================================================
 # 페이지 1: 교통안전 분석
 # =============================================================
 def page_analysis(df, log):
@@ -203,43 +284,17 @@ def page_regression(df):
     n_trees = st.sidebar.slider("랜덤 포레스트 나무 수", 20, 300, 100, 20)
 
     features = ["지정 수"] + (["연도"] if use_year else [])
-    train, test = df[df["연도"] < split_year], df[df["연도"] >= split_year]
-    X_train, y_train = train[features], train[target]
-    X_test, y_test = test[features], test[target]
+    result, preds, models, train, test = evaluate(df, target, features, split_year,
+                                                  max_depth, n_trees)
     st.caption(f"학습 {len(train)}개({train['연도'].min()}~{train['연도'].max()}) / "
                f"테스트 {len(test)}개({test['연도'].min()}~{test['연도'].max()}) - 시간 순서 분할")
 
-    models = {
-        "베이스라인(평균)": DummyRegressor(strategy="mean"),
-        "선형 회귀": LinearRegression(),
-        "결정트리": DecisionTreeRegressor(max_depth=max_depth, random_state=42),
-        "랜덤 포레스트": RandomForestRegressor(n_estimators=n_trees, max_depth=max_depth,
-                                            random_state=42),
-    }
-
-    rows, preds = [], {}
-    X_all, y_all = df[features], df[target]
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        p = model.predict(X_test)
-        preds[name] = p
-        loo = cross_val_predict(model, X_all, y_all, cv=LeaveOneOut())
-        rows.append({
-            "모델": name,
-            "MAE": mean_absolute_error(y_test, p),
-            "RMSE": np.sqrt(mean_squared_error(y_test, p)),
-            "R²": r2_score(y_test, p) if len(y_test) > 1 else np.nan,
-            "LOOCV MAE": mean_absolute_error(y_all, loo),
-            "LOOCV R²": r2_score(y_all, loo),
-        })
-
-    result = pd.DataFrame(rows)
     cols = [c for c in result.columns if c != "모델"]
-
-    st.header("📋 성능 비교표")
+    st.header("📋 성능 비교표 (학습용 vs 시험용)")
     st.dataframe(result.style.format({c: "{:.3f}" for c in cols}),
                  hide_index=True, use_container_width=True)
-    st.caption("MAE·RMSE는 작을수록, R²는 1에 가까울수록 좋습니다. R²가 0보다 작으면 평균 예측보다 못합니다.")
+    st.caption("학습 지표만 좋고 시험 지표가 나쁘면 학습 데이터를 외운 과적합 신호입니다. "
+               "모델 비교는 시험 MAE·RMSE·R²와 LOOCV로 하세요. R²가 0보다 작으면 평균 예측보다 못합니다.")
 
     st.header("📈 전체 기간 실제값과 테스트 기간 예측")
     full = pd.DataFrame({"연도": df["연도"], "실제": df[target]})
@@ -258,11 +313,11 @@ def page_regression(df):
                f"예측선은 테스트 구간({split_year}~{max_y})에만 나타나요.")
 
     real = result[result["모델"] != "베이스라인(평균)"]
-    best = real.loc[real["MAE"].idxmin()]
+    best = real.loc[real["시험 MAE"].idxmin()]
     base = result[result["모델"] == "베이스라인(평균)"].iloc[0]
-    st.info(f"🔎 **발견:** 테스트 MAE가 가장 낮은 모델은 **{best['모델']}**입니다.  \n"
-            f"📎 **근거:** MAE {best['MAE']:.2f} (베이스라인 {base['MAE']:.2f}), "
-            f"R² {best['R²']:.3f}, LOOCV R² {best['LOOCV R²']:.3f}")
+    st.info(f"🔎 **발견:** 시험 MAE가 가장 낮은 모델은 **{best['모델']}**입니다.  \n"
+            f"📎 **근거:** 시험 MAE {best['시험 MAE']:.2f} (베이스라인 {base['시험 MAE']:.2f}), "
+            f"시험 R² {best['시험 R²']:.3f}, LOOCV R² {best['LOOCV R²']:.3f}")
 
     st.header("🔍 선형 회귀 해석")
     lin = models["선형 회귀"]
@@ -271,16 +326,226 @@ def page_regression(df):
     st.write(f"절편: {lin.intercept_:.2f}")
 
     st.header("📝 README에 붙여넣을 표")
-    head = "| " + " | ".join(result.columns) + " |"
-    div = "|" + "|".join(["---"] * len(result.columns)) + "|"
-    body = ["| " + " | ".join([r["모델"]] + [f"{r[c]:.3f}" for c in cols]) + " |"
-            for _, r in result.iterrows()]
-    md = "\n".join([head, div] + body)
+    md = to_markdown_table(result)
     st.code(md, language="markdown")
     st.download_button("표를 .md로 저장", md, file_name="regression_comparison.md")
 
     st.warning("표본이 16개뿐이고 지정 수와 사고 건수는 둘 다 시간에 따라 변해 상관이 있어도 "
                "원인이라 할 수 없습니다. 트리 계열은 학습 범위 밖 값을 예측하지 못합니다.")
+
+
+# =============================================================
+# 페이지 3: 분류 모델 비교 (사고 '많은 해' 분류)
+# =============================================================
+def page_classification(df):
+    st.title("🎯 분류: 사고가 '많은 해'일까?")
+    st.markdown("사고 건수가 기준보다 많은 해를 **1(많음)**, 아니면 **0(적음)** 으로 두고 분류합니다.")
+
+    c1, c2, c3, c4 = st.columns(4)
+    q = c1.slider("'많은 해' 기준 분위수", 0.5, 0.8, 0.7, 0.05,
+                  help="0.7이면 사고 건수 상위 30%인 해를 '많음'으로 둡니다.")
+    use_year = c2.checkbox("연도도 특성에 포함", value=False)
+    max_depth = c3.slider("트리 max_depth", 1, 6, 2)
+    n_trees = c4.slider("랜덤 포레스트 나무 수", 20, 300, 100, 20)
+
+    features = ["지정 수"] + (["연도"] if use_year else [])
+    cut = float(df["사고 건수"].quantile(q))
+    y = (df["사고 건수"] >= cut).astype(int).values
+    X = df[features]
+
+    n_pos, n_neg = int(y.sum()), int(len(y) - y.sum())
+    st.write(f"사고 건수 **{cut:,.1f}건 이상**이면 '많음' → 많음 {n_pos}개 / 적음 {n_neg}개 "
+             f"(많음 연도: {', '.join(map(str, df.loc[y == 1, '연도']))})")
+    if min(n_pos, n_neg) < 2:
+        st.error("한쪽 클래스가 2개 미만이라 평가할 수 없어요. 기준 분위수를 조정하세요.")
+        return
+    st.caption("자료가 연도별 16행뿐이라 시험 데이터를 따로 떼지 않고, 한 해씩 빼고 나머지로 학습해 "
+               "그 해를 예측하는 방식(LOOCV)으로 16개 전체의 예측을 모았습니다.")
+
+    # ---- 모델 (가중치 켬) ----
+    models = {
+        "로지스틱 회귀": make_pipeline(StandardScaler(),
+                                  LogisticRegression(class_weight="balanced", max_iter=1000)),
+        "결정트리": DecisionTreeClassifier(max_depth=max_depth, class_weight="balanced",
+                                       random_state=42),
+        "랜덤 포레스트": RandomForestClassifier(n_estimators=n_trees, max_depth=max_depth,
+                                            class_weight="balanced", random_state=42),
+    }
+    logit_off = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    loo = LeaveOneOut()
+
+    probas = {n: cross_val_predict(m, X, y, cv=loo, method="predict_proba")[:, 1]
+              for n, m in models.items()}
+    proba_off = cross_val_predict(logit_off, X, y, cv=loo, method="predict_proba")[:, 1]
+    base_pred = cross_val_predict(DummyClassifier(strategy="most_frequent"), X, y, cv=loo)
+
+    # ---- 1. 혼동행렬 ----
+    st.header("1️⃣ 가중치를 켠 로지스틱 회귀의 혼동행렬")
+    pred_lr = (probas["로지스틱 회귀"] >= 0.5).astype(int)
+    tn, fp, fn, tp = cm_counts(y, pred_lr)
+    left, right = st.columns([1, 1])
+    with left:
+        st.plotly_chart(cm_figure(tn, fp, fn, tp, "로지스틱 회귀 (판정 기준 0.5)"),
+                        use_container_width=True)
+    with right:
+        st.markdown(f"""
+- **TP {tp}**: 실제 많은 해를 '많음'으로 맞힘
+- **FP {fp}**: 적은 해인데 '많음'이라 잘못 예측 (헛경보)
+- **FN {fn}**: 많은 해인데 '적음'이라 놓침
+- **TN {tn}**: 적은 해를 '적음'으로 맞힘
+""")
+
+    # ---- 2. 정밀도·재현율·F1 직접 계산 ----
+    st.header("2️⃣ 정밀도·재현율·F1이란? (숫자로 직접 계산)")
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+    f1 = safe_div(2 * precision * recall, precision + recall)
+    acc = safe_div(tp + tn, tp + tn + fp + fn)
+    st.markdown(f"""
+- **정밀도** = '많음'이라고 한 것 중 진짜 많은 해의 비율 = TP ÷ (TP+FP)
+  = {tp} ÷ ({tp}+{fp}) = **{precision:.3f}**
+- **재현율** = 진짜 많은 해 중 찾아낸 비율 = TP ÷ (TP+FN)
+  = {tp} ÷ ({tp}+{fn}) = **{recall:.3f}**
+- **F1** = 정밀도와 재현율의 조화평균 = 2×정밀도×재현율 ÷ (정밀도+재현율)
+  = 2×{precision:.3f}×{recall:.3f} ÷ ({precision:.3f}+{recall:.3f}) = **{f1:.3f}**
+- **정확도** = (TP+TN) ÷ 전체 = ({tp}+{tn}) ÷ {tp + tn + fp + fn} = **{acc:.3f}**
+""")
+    st.caption("분모가 0이면 0으로 처리했어요. 이 값들이 아래 표의 로지스틱 회귀 값과 같은지 확인해 보세요.")
+
+    # ---- 3. 정확도 비교 ----
+    st.header("3️⃣ 정확도 비교: 가중치 켬 vs 끔 vs 베이스라인")
+    pred_off = (proba_off >= 0.5).astype(int)
+    acc_df = pd.DataFrame({
+        "모델": ["로지스틱(가중치 켬)", "로지스틱(가중치 끔)", "베이스라인(항상 다수 클래스)"],
+        "정확도": [accuracy_score(y, pred_lr), accuracy_score(y, pred_off),
+                accuracy_score(y, base_pred)],
+        "재현율": [recall_score(y, pred_lr, zero_division=0),
+                recall_score(y, pred_off, zero_division=0),
+                recall_score(y, base_pred, zero_division=0)],
+    })
+    st.dataframe(acc_df.style.format({"정확도": "{:.3f}", "재현율": "{:.3f}"}),
+                 hide_index=True, use_container_width=True)
+    st.caption("베이스라인은 '많음'이 소수일 때 모두 '적음'이라고만 해도 정확도가 높게 나옵니다. "
+               "그래서 정확도만 보면 안 되고 재현율을 함께 봐야 합니다.")
+
+    # ---- 4. 네 모델 비교 + 최종 모델 ----
+    st.header("4️⃣ 세 모델 + 베이스라인 비교 (가중치 켬)")
+    rows = [{"모델": "베이스라인", **cls_metrics(y, base_pred)}]
+    for n, p in probas.items():
+        rows.append({"모델": n, **cls_metrics(y, (p >= 0.5).astype(int))})
+    comp = pd.DataFrame(rows)
+    metric_cols = ["정확도", "정밀도", "재현율", "F1"]
+    st.dataframe(comp.style.format({c: "{:.3f}" for c in metric_cols}),
+                 hide_index=True, use_container_width=True)
+    long = comp.melt(id_vars="모델", var_name="지표", value_name="점수")
+    fig = px.bar(long, x="지표", y="점수", color="모델", barmode="group",
+                 text=long["점수"].round(2))
+    fig.update_layout(yaxis_range=[0, 1.1])
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("최종 모델 고르기")
+    crit = st.radio("선택 기준", ["F1 우선 (정밀도·재현율 균형)", "재현율 우선 (많은 해를 놓치지 않기)"],
+                    horizontal=True)
+    key = "F1" if crit.startswith("F1") else "재현율"
+    sec = "재현율" if key == "F1" else "F1"
+    real = comp[comp["모델"] != "베이스라인"].sort_values([key, sec], ascending=False)
+    top = real.iloc[0]
+    st.success(f"기준 '{key}'으로 고르면 **{top['모델']}** (F1 {top['F1']:.3f}, "
+               f"재현율 {top['재현율']:.3f}, 정밀도 {top['정밀도']:.3f}, 정확도 {top['정확도']:.3f})")
+    st.markdown("""
+**최종 모델을 고를 때 기준 예시**
+1. 베이스라인보다 재현율·F1이 나은가? (정확도는 참고만)
+2. 사고가 많은 해를 놓치는 것(FN)과 헛경보(FP) 중 무엇이 더 큰 문제인가? 놓치면 안 된다면 재현율 우선
+3. 점수가 비슷하면 더 단순하고 설명하기 쉬운 모델 (로지스틱 회귀 > 결정트리 > 랜덤 포레스트)
+4. 표본이 16개라 점수 차이가 1~2개 연도 때문일 수 있음을 함께 적기
+""")
+
+    # ---- 5. 판정 기준 슬라이더 ----
+    st.header("5️⃣ 판정 기준을 바꾸면?")
+    model_name = st.selectbox("모델 선택", list(models.keys()))
+    thr = st.slider("판정 기준 (확률이 이 값 이상이면 '많음')", 0.05, 0.95, 0.5, 0.05)
+    p = probas[model_name]
+    pred_t = (p >= thr).astype(int)
+    tn2, fp2, fn2, tp2 = cm_counts(y, pred_t)
+    m = cls_metrics(y, pred_t)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("정확도", f"{m['정확도']:.3f}")
+    k2.metric("정밀도", f"{m['정밀도']:.3f}")
+    k3.metric("재현율", f"{m['재현율']:.3f}")
+    k4.metric("F1", f"{m['F1']:.3f}")
+
+    a, b = st.columns(2)
+    with a:
+        st.plotly_chart(cm_figure(tn2, fp2, fn2, tp2, f"{model_name} (기준 {thr})"),
+                        use_container_width=True)
+    with b:
+        ths = np.round(np.arange(0.05, 0.96, 0.05), 2)
+        rows = []
+        for t in ths:
+            mm = cls_metrics(y, (p >= t).astype(int))
+            rows.append({"기준": t, "정밀도": mm["정밀도"], "재현율": mm["재현율"], "F1": mm["F1"]})
+        tdf = pd.DataFrame(rows).melt(id_vars="기준", var_name="지표", value_name="점수")
+        fig = px.line(tdf, x="기준", y="점수", color="지표", markers=True,
+                      title="판정 기준에 따른 정밀도·재현율·F1")
+        fig.add_vline(x=thr, line_dash="dash", line_color="gray")
+        fig.update_layout(yaxis_range=[0, 1.05])
+        st.plotly_chart(fig, use_container_width=True)
+    st.caption("기준을 낮추면 '많음'이라고 더 쉽게 말해 재현율은 오르고 정밀도는 내려가는 경향이 있어요. "
+               "트리 모델은 확률이 몇 가지 값뿐이라 선이 계단처럼 변할 수 있어요.")
+
+    st.warning("자료가 16개 연도뿐이라 한두 해만 달라져도 지표가 크게 변합니다. "
+               "지정 수와 사고의 관계는 상관일 뿐 원인이라고 단정할 수 없습니다.")
+
+
+# =============================================================
+# 페이지 4: 검증 기록 (log)
+# =============================================================
+def page_log(df):
+    st.title("📓 검증 기록 남기기")
+    st.markdown("AI의 제안을 **시험용 데이터로 확인**해 고치거나 버린 과정을 log에 남깁니다. "
+                "아래 표는 앱이 계산한 실제 값이니 근거로 쓰세요.")
+
+    min_y, max_y = int(df["연도"].min()), int(df["연도"].max())
+    c1, c2, c3 = st.columns(3)
+    target = c1.selectbox("예측할 값(y)", [c for c in ["사고 건수", "사망자", "부상자"]
+                                          if df[c].notna().any()])
+    split_year = c2.slider("테스트 시작 연도", min_y + 8, max_y - 1, min(2021, max_y - 1))
+    max_depth = c3.slider("트리 max_depth", 1, 6, 2)
+
+    result, _, _, train, test = evaluate(df, target, ["지정 수"], split_year, max_depth, 100)
+    st.caption(f"학습 {train['연도'].min()}~{train['연도'].max()} ({len(train)}개) / "
+               f"시험 {test['연도'].min()}~{test['연도'].max()} ({len(test)}개)")
+
+    st.subheader("근거: 학습용 vs 시험용 지표")
+    cols = [c for c in result.columns if c != "모델"]
+    st.dataframe(result.style.format({c: "{:.3f}" for c in cols}),
+                 hide_index=True, use_container_width=True)
+
+    st.subheader("기록 입력")
+    name = st.text_input("학번 이름", "")
+    decision = st.text_area(
+        "오늘 결정한 것",
+        "모델은 학습용이 아니라 시험용 데이터의 MAE·RMSE·R²로 비교하기로 함.")
+    prompt = st.text_area(
+        "AI에게 보낸 프롬프트(원문)",
+        "학습 R²가 1에 가까운 게 이상해. 결정트리는 깊게 만들면 학습 데이터를 외운다고 했잖아. "
+        "이 값은 어떤 데이터로 계산한 거야? 시험용 데이터로 MAE, RMSE, R²를 다시 계산해 줘.")
+    discard = st.text_area(
+        "AI가 준 것 중 고치거나 버린 것과 그 이유",
+        "위 표의 실제 숫자로 바꿔 쓰세요.")
+    feeling = st.text_area(
+        "느낀 점",
+        "학습용 점수가 너무 좋다는 것이 오히려 의심해야 할 신호라는 걸 알게 됨.")
+
+    log_md = f"""## {name if name else '학번 이름'}
+- 오늘 결정한 것: {decision}
+- AI에게 보낸 프롬프트(원문): {prompt}
+- AI가 준 것 중 고치거나 버린 것과 그 이유: {discard}
+- 느낀 점: {feeling}
+"""
+    st.subheader("log에 붙여넣을 기록")
+    st.code(log_md, language="markdown")
+    st.download_button("기록을 .md로 저장", log_md, file_name="verification_log.md")
 
 
 # =============================================================
@@ -291,10 +556,16 @@ if err:
     st.error(err)
     st.stop()
 
-page = st.sidebar.radio("📂 페이지 선택", ["🚸 교통안전 분석", "📐 회귀 모델 비교"])
+page = st.sidebar.radio("📂 페이지 선택",
+                        ["🚸 교통안전 분석", "📐 회귀 모델 비교",
+                         "🎯 분류 모델 비교", "📓 검증 기록"])
 st.sidebar.divider()
 
 if page.startswith("🚸"):
     page_analysis(data, log_df)
-else:
+elif page.startswith("📐"):
     page_regression(data)
+elif page.startswith("🎯"):
+    page_classification(data)
+else:
+    page_log(data)
